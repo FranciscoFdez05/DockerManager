@@ -3,13 +3,84 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Docker Gestor</title>
+  <title>DockerManager</title>
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+  <link rel="manifest" href="/manifest.json">
+  <meta name="theme-color" content="#161b22">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css" />
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
+
+  <!-- ── Setup modal (primer arranque) ── -->
+  <div id="setup-modal" class="modal hidden login-overlay">
+    <div class="login-box">
+      <div class="login-logo">
+        <svg width="40" height="40" viewBox="0 0 32 32" fill="none">
+          <rect x="2" y="14" width="6" height="5" rx="1" fill="#58a6ff"/>
+          <rect x="10" y="14" width="6" height="5" rx="1" fill="#58a6ff"/>
+          <rect x="18" y="14" width="6" height="5" rx="1" fill="#58a6ff"/>
+          <rect x="10" y="7" width="6" height="5" rx="1" fill="#58a6ff"/>
+          <rect x="18" y="7" width="6" height="5" rx="1" fill="#58a6ff"/>
+          <path d="M28 17c1-1 2-3 1-5s-3-3-5-2H23c-1-5-5-8-10-7" stroke="#58a6ff" stroke-width="1.5" stroke-linecap="round"/>
+          <path d="M2 19c0 3 2 5 5 5h18c3 0 5-2 4-5" stroke="#58a6ff" stroke-width="1.5" stroke-linecap="round"/>
+        </svg>
+        <h2>Bienvenido a DockerManager</h2>
+      </div>
+      <p class="login-sub">Primera vez que arrancas la app. Crea tu cuenta de administrador.</p>
+      <input id="setup-user" type="text" class="form-input" placeholder="Usuario (mín. 3 caracteres)" autocomplete="username" />
+      <input id="setup-pass" type="password" class="form-input" placeholder="Contraseña (mín. 8 caracteres)" autocomplete="new-password" />
+      <input id="setup-confirm" type="password" class="form-input" placeholder="Confirmar contraseña" autocomplete="new-password" />
+      <div id="setup-error" class="login-error hidden"></div>
+      <button class="btn-green login-btn" onclick="doSetup()">Crear cuenta</button>
+    </div>
+  </div>
+
+  <!-- ── Login modal ── -->
+  <div id="login-modal" class="modal hidden login-overlay">
+    <div class="login-box">
+      <div class="login-logo">
+        <svg width="40" height="40" viewBox="0 0 32 32" fill="none">
+          <rect x="2" y="14" width="6" height="5" rx="1" fill="#58a6ff"/>
+          <rect x="10" y="14" width="6" height="5" rx="1" fill="#58a6ff"/>
+          <rect x="18" y="14" width="6" height="5" rx="1" fill="#58a6ff"/>
+          <rect x="10" y="7" width="6" height="5" rx="1" fill="#58a6ff"/>
+          <rect x="18" y="7" width="6" height="5" rx="1" fill="#58a6ff"/>
+          <path d="M28 17c1-1 2-3 1-5s-3-3-5-2H23c-1-5-5-8-10-7" stroke="#58a6ff" stroke-width="1.5" stroke-linecap="round"/>
+          <path d="M2 19c0 3 2 5 5 5h18c3 0 5-2 4-5" stroke="#58a6ff" stroke-width="1.5" stroke-linecap="round"/>
+        </svg>
+        <h2>DockerManager</h2>
+      </div>
+      <p class="login-sub">Introduce tus credenciales para continuar</p>
+      <input id="login-user" type="text" class="form-input" placeholder="Usuario" autocomplete="username" />
+      <input id="login-pass" type="password" class="form-input" placeholder="Contraseña" autocomplete="current-password" />
+      <div id="login-error" class="login-error hidden"></div>
+      <button class="btn-accent login-btn" onclick="doLogin()">Entrar</button>
+    </div>
+  </div>
+
+  <!-- ── Cambiar contraseña modal ── -->
+  <div id="chpass-modal" class="modal hidden">
+    <div class="modal-content modal-sm">
+      <div class="modal-header">
+        <div class="modal-title"><span class="modal-label">Cambiar contraseña</span></div>
+        <div class="modal-actions">
+          <button class="btn-close" onclick="closeModal('chpass-modal')">&#x2715; Cerrar</button>
+        </div>
+      </div>
+      <div class="pull-body" style="display:flex;flex-direction:column;gap:10px">
+        <input id="cp-current" type="password" class="form-input" placeholder="Contraseña actual" />
+        <input id="cp-new" type="password" class="form-input" placeholder="Nueva contraseña (mín. 8 caracteres)" />
+        <input id="cp-confirm" type="password" class="form-input" placeholder="Confirmar nueva contraseña" />
+        <div id="cp-error" class="login-error hidden"></div>
+        <button class="btn-green" onclick="doChangePassword()">Guardar</button>
+      </div>
+    </div>
+  </div>
+
   <header>
     <div class="header-left">
-      <svg width="28" height="28" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <svg width="26" height="26" viewBox="0 0 32 32" fill="none">
         <rect x="2" y="14" width="6" height="5" rx="1" fill="#58a6ff"/>
         <rect x="10" y="14" width="6" height="5" rx="1" fill="#58a6ff"/>
         <rect x="18" y="14" width="6" height="5" rx="1" fill="#58a6ff"/>
@@ -18,14 +89,17 @@
         <path d="M28 17c1-1 2-3 1-5s-3-3-5-2H23c-1-5-5-8-10-7" stroke="#58a6ff" stroke-width="1.5" stroke-linecap="round"/>
         <path d="M2 19c0 3 2 5 5 5h18c3 0 5-2 4-5" stroke="#58a6ff" stroke-width="1.5" stroke-linecap="round"/>
       </svg>
-      <h1>Docker Gestor</h1>
+      <h1>DockerManager</h1>
     </div>
     <div class="header-right">
       <div id="host-stats-bar" class="host-stats-bar"></div>
       <span id="docker-status" class="status-badge">Conectando...</span>
-      <button onclick="openSystemInfo()">&#x2139;&#xFE0F; Sistema</button>
+      <button onclick="openSystemInfo()">&#x2139; Sistema</button>
       <button onclick="confirmPrune()" class="btn-yellow">&#x1F9F9; Prune</button>
+      <button class="btn-green" onclick="openCreate()">&#x2B; Nuevo</button>
       <button id="refresh-btn" onclick="loadAll()">&#x21BA; Actualizar</button>
+      <button id="chpass-btn" class="hidden" onclick="openChangePassword()">&#x1F511; Contraseña</button>
+      <button id="logout-btn" class="hidden btn-red" onclick="doLogout()">Salir</button>
     </div>
   </header>
 
@@ -35,9 +109,10 @@
       <div class="section-header">
         <h2>Contenedores</h2>
         <span id="container-count" class="count-badge"></span>
+        <input id="filter-input" class="filter-input" type="text" placeholder="Filtrar..." oninput="filterContainers()" />
       </div>
       <div class="table-wrapper">
-        <table>
+        <table id="containers-table">
           <thead>
             <tr>
               <th>Nombre</th>
@@ -60,7 +135,7 @@
       <div class="section-header">
         <h2>Im&aacute;genes</h2>
         <span id="image-count" class="count-badge"></span>
-        <button class="btn-accent" style="margin-left:8px" onclick="openPullModal()">&#x2B07; Pull imagen</button>
+        <button class="btn-accent" style="margin-left:8px" onclick="openPullModal()">&#x2B07; Pull</button>
       </div>
       <div class="table-wrapper">
         <table>
@@ -130,7 +205,7 @@
     </section>
   </main>
 
-  <!-- Modal: Logs -->
+  <!-- ── Modal: Logs ── -->
   <div id="log-modal" class="modal hidden">
     <div class="modal-content">
       <div class="modal-header">
@@ -140,9 +215,9 @@
         </div>
         <div class="modal-actions">
           <label class="autoscroll-label">
-            <input type="checkbox" id="autoscroll-toggle" checked>
-            Auto-scroll
+            <input type="checkbox" id="autoscroll-toggle" checked> Auto-scroll
           </label>
+          <button onclick="downloadLogs()">&#x2B07; Descargar</button>
           <button onclick="clearLogs()">Limpiar</button>
           <button class="btn-close" onclick="closeModal('log-modal')">&#x2715; Cerrar</button>
         </div>
@@ -151,9 +226,9 @@
     </div>
   </div>
 
-  <!-- Modal: Stats live -->
+  <!-- ── Modal: Stats ── -->
   <div id="stats-modal" class="modal hidden">
-    <div class="modal-content modal-sm">
+    <div class="modal-content modal-md">
       <div class="modal-header">
         <div class="modal-title">
           <span class="modal-label">Recursos</span>
@@ -175,18 +250,23 @@
           <span id="stats-mem-val" class="stat-val">—</span>
         </div>
         <div class="stat-row">
-          <span class="stat-label">Red RX</span>
+          <span class="stat-label">Net RX</span>
+          <div class="bar-wrap"></div>
           <span id="stats-net-rx" class="stat-val">—</span>
         </div>
         <div class="stat-row">
-          <span class="stat-label">Red TX</span>
+          <span class="stat-label">Net TX</span>
+          <div class="bar-wrap"></div>
           <span id="stats-net-tx" class="stat-val">—</span>
+        </div>
+        <div class="chart-wrap">
+          <canvas id="stats-chart"></canvas>
         </div>
       </div>
     </div>
   </div>
 
-  <!-- Modal: Inspect -->
+  <!-- ── Modal: Inspect ── -->
   <div id="inspect-modal" class="modal hidden">
     <div class="modal-content modal-lg">
       <div class="modal-header">
@@ -202,7 +282,7 @@
     </div>
   </div>
 
-  <!-- Modal: Procesos -->
+  <!-- ── Modal: Procesos ── -->
   <div id="proc-modal" class="modal hidden">
     <div class="modal-content">
       <div class="modal-header">
@@ -219,13 +299,11 @@
     </div>
   </div>
 
-  <!-- Modal: Sistema -->
+  <!-- ── Modal: Sistema ── -->
   <div id="sysinfo-modal" class="modal hidden">
     <div class="modal-content modal-sm">
       <div class="modal-header">
-        <div class="modal-title">
-          <span class="modal-label">Sistema Docker</span>
-        </div>
+        <div class="modal-title"><span class="modal-label">Sistema Docker</span></div>
         <div class="modal-actions">
           <button class="btn-close" onclick="closeModal('sysinfo-modal')">&#x2715; Cerrar</button>
         </div>
@@ -234,13 +312,11 @@
     </div>
   </div>
 
-  <!-- Modal: Pull imagen -->
+  <!-- ── Modal: Pull ── -->
   <div id="pull-modal" class="modal hidden">
     <div class="modal-content modal-sm">
       <div class="modal-header">
-        <div class="modal-title">
-          <span class="modal-label">Pull imagen</span>
-        </div>
+        <div class="modal-title"><span class="modal-label">Pull imagen</span></div>
         <div class="modal-actions">
           <button class="btn-close" onclick="closeModal('pull-modal')">&#x2715; Cerrar</button>
         </div>
@@ -248,7 +324,7 @@
       <div class="pull-body">
         <p style="color:var(--dim);font-size:12px;margin-bottom:10px">Ej: nginx:latest, ubuntu:22.04</p>
         <div style="display:flex;gap:8px">
-          <input id="pull-tag-input" type="text" class="pull-input" placeholder="imagen:tag" />
+          <input id="pull-tag-input" type="text" class="form-input" placeholder="imagen:tag" />
           <button class="btn-accent" onclick="doPull()">&#x2B07; Pull</button>
         </div>
         <div id="pull-status" style="margin-top:12px;font-size:13px"></div>
@@ -256,9 +332,117 @@
     </div>
   </div>
 
-  <!-- Notificaciones toast -->
+  <!-- ── Modal: Terminal ── -->
+  <div id="term-modal" class="modal hidden">
+    <div class="modal-content modal-term">
+      <div class="modal-header">
+        <div class="modal-title">
+          <span class="modal-label">Terminal</span>
+          <span id="term-container-name"></span>
+        </div>
+        <div class="modal-actions">
+          <span id="term-status" class="dim" style="font-size:12px"></span>
+          <button class="btn-close" onclick="closeTerminal()">&#x2715; Cerrar</button>
+        </div>
+      </div>
+      <div id="terminal-container" class="terminal-container"></div>
+    </div>
+  </div>
+
+  <!-- ── Modal: Crear contenedor ── -->
+  <div id="create-modal" class="modal hidden">
+    <div class="modal-content modal-md">
+      <div class="modal-header">
+        <div class="modal-title"><span class="modal-label">Nuevo contenedor</span></div>
+        <div class="modal-actions">
+          <button class="btn-close" onclick="closeModal('create-modal')">&#x2715; Cerrar</button>
+        </div>
+      </div>
+      <div class="create-form">
+        <div class="form-grid">
+          <div class="form-group">
+            <label class="form-label">Imagen *</label>
+            <input id="c-image" type="text" class="form-input" placeholder="nginx:latest" />
+          </div>
+          <div class="form-group">
+            <label class="form-label">Nombre (opcional)</label>
+            <input id="c-name" type="text" class="form-input" placeholder="mi-contenedor" />
+          </div>
+          <div class="form-group">
+            <label class="form-label">Restart policy</label>
+            <select id="c-restart" class="form-input form-select">
+              <option value="no">no</option>
+              <option value="always">always</option>
+              <option value="unless-stopped" selected>unless-stopped</option>
+              <option value="on-failure">on-failure</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label class="form-label">Red</label>
+            <select id="c-network" class="form-input form-select">
+              <option value="">Por defecto</option>
+            </select>
+          </div>
+          <div class="form-group" style="grid-column:1/-1">
+            <label class="form-label">Comando (opcional)</label>
+            <input id="c-command" type="text" class="form-input" placeholder="Deja vacío para usar el CMD de la imagen" />
+          </div>
+        </div>
+
+        <div class="form-group">
+          <div class="form-section-header">
+            <label class="form-label">Puertos (host:contenedor)</label>
+            <button onclick="addRow('ports-list','8080:80')" class="btn-accent btn-xs">+ Añadir</button>
+          </div>
+          <div id="ports-list" class="dynamic-list"></div>
+        </div>
+
+        <div class="form-group">
+          <div class="form-section-header">
+            <label class="form-label">Variables de entorno (KEY=VALUE)</label>
+            <button onclick="addRow('env-list','KEY=VALUE')" class="btn-accent btn-xs">+ Añadir</button>
+          </div>
+          <div id="env-list" class="dynamic-list"></div>
+        </div>
+
+        <div class="form-group">
+          <div class="form-section-header">
+            <label class="form-label">Volúmenes (ruta_host:ruta_contenedor)</label>
+            <button onclick="addRow('vol-list','/data:/data')" class="btn-accent btn-xs">+ Añadir</button>
+          </div>
+          <div id="vol-list" class="dynamic-list"></div>
+        </div>
+
+        <div id="create-error" class="create-error hidden"></div>
+        <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:8px">
+          <button onclick="closeModal('create-modal')">Cancelar</button>
+          <button class="btn-green" onclick="submitCreate()">&#x25B6; Crear contenedor</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Modal: Historial de imagen ── -->
+  <div id="history-modal" class="modal hidden">
+    <div class="modal-content modal-lg">
+      <div class="modal-header">
+        <div class="modal-title">
+          <span class="modal-label">Historial</span>
+          <span id="history-image-name"></span>
+        </div>
+        <div class="modal-actions">
+          <button class="btn-close" onclick="closeModal('history-modal')">&#x2715; Cerrar</button>
+        </div>
+      </div>
+      <div id="history-body" class="proc-body"></div>
+    </div>
+  </div>
+
   <div id="toast-container"></div>
 
+  <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

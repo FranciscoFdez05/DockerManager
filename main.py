@@ -1,16 +1,232 @@
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Request, Response
 from fastapi.staticfiles import StaticFiles
+from fastapi.responses import JSONResponse
+from starlette.middleware.base import BaseHTTPMiddleware
 import docker
 import docker.errors
 import asyncio
 import threading
+import queue as thread_queue
 import json
 import psutil
 import socket
+import os
+import secrets
+import select as sel
+import bcrypt
+from collections import defaultdict
+from datetime import datetime, timedelta
 
-app = FastAPI(title="Docker Gestor")
+app = FastAPI(title="DockerManager")
+
+# ── Configuración persistente ─────────────────────────────────────────────────
+DATA_DIR = os.getenv("DATA_DIR", "./data")
+CONFIG_FILE = os.path.join(DATA_DIR, "config.json")
 
 
+def _ensure_data_dir():
+    os.makedirs(DATA_DIR, exist_ok=True)
+
+
+def load_config() -> dict | None:
+    try:
+        with open(CONFIG_FILE) as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+def save_config(cfg: dict):
+    _ensure_data_dir()
+    with open(CONFIG_FILE, "w") as f:
+        json.dump(cfg, f, indent=2)
+
+
+def hash_password(password: str) -> str:
+    return bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt(12)).decode("utf-8")
+
+
+def verify_password(password: str, hashed: str) -> bool:
+    try:
+        return bcrypt.checkpw(password.encode("utf-8"), hashed.encode("utf-8"))
+    except Exception:
+        return False
+
+
+# ── Sesión en memoria (se regenera en cada login) ─────────────────────────────
+_session: dict = {"token": secrets.token_hex(32)}
+
+
+def _get_token() -> str:
+    return _session["token"]
+
+
+def _new_token() -> str:
+    _session["token"] = secrets.token_hex(32)
+    return _session["token"]
+
+
+# ── Rate limiting anti-fuerza-bruta ───────────────────────────────────────────
+_rate_lock = threading.Lock()
+_attempts: dict[str, list] = defaultdict(list)
+MAX_ATTEMPTS = 5
+LOCKOUT_MIN = 15
+
+
+def _is_locked(ip: str) -> bool:
+    with _rate_lock:
+        cutoff = datetime.utcnow() - timedelta(minutes=LOCKOUT_MIN)
+        _attempts[ip] = [t for t in _attempts[ip] if t > cutoff]
+        return len(_attempts[ip]) >= MAX_ATTEMPTS
+
+
+def _record_fail(ip: str):
+    with _rate_lock:
+        _attempts[ip].append(datetime.utcnow())
+
+
+def _clear_attempts(ip: str):
+    with _rate_lock:
+        _attempts[ip] = []
+
+
+def _client_ip(request: Request) -> str:
+    forwarded = request.headers.get("X-Forwarded-For")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    return request.client.host if request.client else "unknown"
+
+
+# ── Middleware: cabeceras de seguridad ────────────────────────────────────────
+class SecurityHeadersMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        response = await call_next(request)
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["X-XSS-Protection"] = "1; mode=block"
+        response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+        response.headers["Content-Security-Policy"] = (
+            "default-src 'self'; "
+            "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "
+            "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "
+            "font-src 'self' https://cdn.jsdelivr.net data:; "
+            "img-src 'self' data:; "
+            "connect-src 'self' ws: wss:;"
+        )
+        return response
+
+
+# ── Middleware: autenticación ─────────────────────────────────────────────────
+class AuthMiddleware(BaseHTTPMiddleware):
+    _PUBLIC = {"/api/auth/login", "/api/auth/status", "/api/auth/setup"}
+
+    async def dispatch(self, request: Request, call_next):
+        path = request.url.path
+        if not path.startswith("/api") or path in self._PUBLIC:
+            return await call_next(request)
+        cfg = load_config()
+        if not cfg:
+            return JSONResponse({"detail": "Setup requerido"}, status_code=403)
+        if request.cookies.get("dm_session") != _get_token():
+            return JSONResponse({"detail": "No autorizado"}, status_code=401)
+        return await call_next(request)
+
+
+app.add_middleware(SecurityHeadersMiddleware)
+app.add_middleware(AuthMiddleware)
+
+
+# ── Auth endpoints ────────────────────────────────────────────────────────────
+@app.get("/api/auth/status")
+def auth_status(request: Request):
+    cfg = load_config()
+    if not cfg:
+        return {"setup_needed": True, "authenticated": False}
+    authenticated = request.cookies.get("dm_session") == _get_token()
+    return {"setup_needed": False, "authenticated": authenticated}
+
+
+@app.post("/api/auth/setup")
+def auth_setup(body: dict, response: Response):
+    if load_config():
+        raise HTTPException(403, "La aplicación ya está configurada")
+
+    username = (body.get("username") or "").strip()
+    password = body.get("password") or ""
+    confirm  = body.get("confirm") or ""
+
+    if len(username) < 3 or len(username) > 32:
+        raise HTTPException(400, "El usuario debe tener entre 3 y 32 caracteres")
+    if not username.replace("_", "").replace("-", "").isalnum():
+        raise HTTPException(400, "El usuario solo puede contener letras, números, _ y -")
+    if len(password) < 8:
+        raise HTTPException(400, "La contraseña debe tener al menos 8 caracteres")
+    if password != confirm:
+        raise HTTPException(400, "Las contraseñas no coinciden")
+
+    save_config({"username": username, "password_hash": hash_password(password)})
+    token = _new_token()
+    response.set_cookie("dm_session", token, httponly=True, samesite="strict", max_age=86400 * 30)
+    return {"ok": True}
+
+
+@app.post("/api/auth/login")
+def auth_login(body: dict, response: Response, request: Request):
+    ip = _client_ip(request)
+    if _is_locked(ip):
+        raise HTTPException(429, f"Demasiados intentos fallidos. Espera {LOCKOUT_MIN} minutos.")
+
+    cfg = load_config()
+    if not cfg:
+        raise HTTPException(503, "Setup no completado")
+
+    username = body.get("username") or ""
+    password = body.get("password") or ""
+
+    # Timing-safe comparison para evitar timing attacks
+    username_ok = secrets.compare_digest(username, cfg.get("username", ""))
+    password_ok = verify_password(password, cfg.get("password_hash", "")) if username_ok else False
+
+    if not username_ok or not password_ok:
+        _record_fail(ip)
+        raise HTTPException(401, "Credenciales incorrectas")
+
+    _clear_attempts(ip)
+    token = _new_token()  # Regenerar token en cada login (anti session-fixation)
+    response.set_cookie("dm_session", token, httponly=True, samesite="strict", max_age=86400 * 30)
+    return {"ok": True}
+
+
+@app.post("/api/auth/logout")
+def auth_logout(response: Response):
+    _new_token()  # Invalida la sesión actual
+    response.delete_cookie("dm_session")
+    return {"ok": True}
+
+
+@app.post("/api/auth/change-password")
+def change_password(body: dict, request: Request):
+    cfg = load_config()
+    if not cfg:
+        raise HTTPException(503, "Sin configuración")
+
+    current  = body.get("current") or ""
+    new_pass = body.get("new_password") or ""
+    confirm  = body.get("confirm") or ""
+
+    if not verify_password(current, cfg["password_hash"]):
+        raise HTTPException(401, "Contraseña actual incorrecta")
+    if len(new_pass) < 8:
+        raise HTTPException(400, "La nueva contraseña debe tener al menos 8 caracteres")
+    if new_pass != confirm:
+        raise HTTPException(400, "Las contraseñas no coinciden")
+
+    cfg["password_hash"] = hash_password(new_pass)
+    save_config(cfg)
+    return {"ok": True}
+
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
 def get_docker():
     try:
         return docker.from_env()
@@ -25,14 +241,19 @@ def get_container(client, container_id: str):
         raise HTTPException(404, "Contenedor no encontrado")
 
 
-# ── Containers ────────────────────────────────────────────────────────────────
+def _ws_auth(websocket: WebSocket) -> bool:
+    cfg = load_config()
+    if not cfg:
+        return False
+    return websocket.cookies.get("dm_session") == _get_token()
 
+
+# ── Containers ────────────────────────────────────────────────────────────────
 @app.get("/api/containers")
 def list_containers():
     client = get_docker()
-    containers = client.containers.list(all=True)
     result = []
-    for c in containers:
+    for c in client.containers.list(all=True):
         ports = {}
         if c.ports:
             for k, v in c.ports.items():
@@ -46,6 +267,59 @@ def list_containers():
             "ports": ports,
         })
     return result
+
+
+@app.post("/api/containers/create")
+def create_container(body: dict):
+    client = get_docker()
+    image = (body.get("image") or "").strip()
+    if not image or len(image) > 256:
+        raise HTTPException(400, "Imagen inválida")
+    try:
+        port_bindings = {}
+        for p in body.get("ports", [])[:20]:
+            p = str(p).strip()
+            if not p or len(p) > 30:
+                continue
+            parts = p.split(":")
+            if len(parts) == 2:
+                host_port, container_port = parts
+                proto = "tcp"
+                if "/" in container_port:
+                    container_port, proto = container_port.split("/")
+                port_bindings[f"{container_port}/{proto}"] = int(host_port)
+
+        volumes = {}
+        for v in body.get("volumes", [])[:20]:
+            v = str(v).strip()
+            if not v or len(v) > 512:
+                continue
+            parts = v.split(":")
+            if len(parts) >= 2:
+                mode = parts[2] if len(parts) > 2 else "rw"
+                volumes[parts[0]] = {"bind": parts[1], "mode": mode}
+
+        env = [str(e).strip() for e in body.get("env", [])[:50] if str(e).strip() and len(str(e)) < 512]
+        network = (body.get("network") or "").strip() or None
+        command = (body.get("command") or "").strip() or None
+        name    = (body.get("name") or "").strip() or None
+
+        c = client.containers.run(
+            image=image,
+            name=name,
+            ports=port_bindings if port_bindings else None,
+            environment=env if env else None,
+            volumes=volumes if volumes else None,
+            restart_policy={"Name": body.get("restart_policy", "no")},
+            network=network,
+            command=command,
+            detach=True,
+        )
+        return {"status": "created", "id": c.short_id, "name": c.name}
+    except docker.errors.ImageNotFound:
+        raise HTTPException(404, f"Imagen '{image}' no encontrada. Haz pull primero.")
+    except Exception as e:
+        raise HTTPException(500, str(e))
 
 
 @app.post("/api/containers/{container_id}/start")
@@ -134,31 +408,22 @@ def inspect_container(container_id: str):
             "mac": cfg.get("MacAddress", ""),
         }
     mounts = [
-        {
-            "type": m.get("Type"),
-            "source": m.get("Source", ""),
-            "destination": m.get("Destination", ""),
-            "mode": m.get("Mode", ""),
-            "rw": m.get("RW", True),
-        }
+        {"type": m.get("Type"), "source": m.get("Source", ""),
+         "destination": m.get("Destination", ""), "mode": m.get("Mode", ""), "rw": m.get("RW", True)}
         for m in (a.get("Mounts") or [])
     ]
     cfg = a.get("Config", {})
     host_cfg = a.get("HostConfig", {})
     return {
-        "id": a["Id"][:12],
-        "name": a["Name"].lstrip("/"),
+        "id": a["Id"][:12], "name": a["Name"].lstrip("/"),
         "image": cfg.get("Image", ""),
         "created": a.get("Created", "")[:19].replace("T", " "),
         "status": a["State"]["Status"],
         "started_at": a["State"].get("StartedAt", "")[:19].replace("T", " "),
         "restart_policy": host_cfg.get("RestartPolicy", {}).get("Name", "no"),
         "hostname": cfg.get("Hostname", ""),
-        "env": cfg.get("Env") or [],
-        "cmd": cfg.get("Cmd") or [],
-        "entrypoint": cfg.get("Entrypoint") or [],
-        "networks": networks,
-        "mounts": mounts,
+        "env": cfg.get("Env") or [], "cmd": cfg.get("Cmd") or [],
+        "networks": networks, "mounts": mounts,
         "cpu_shares": host_cfg.get("CpuShares", 0),
         "memory_limit": host_cfg.get("Memory", 0),
     }
@@ -184,57 +449,85 @@ def container_stats_once(container_id: str):
     if c.status != "running":
         return {"cpu_pct": 0, "mem_usage": 0, "mem_limit": 0, "mem_pct": 0, "net_rx": 0, "net_tx": 0}
     try:
-        s = c.stats(stream=False)
-        return _parse_stats(s)
+        return _parse_stats(c.stats(stream=False))
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+
+@app.get("/api/containers/{container_id}/logs/download")
+def download_logs(container_id: str):
+    client = get_docker()
+    c = get_container(client, container_id)
+    try:
+        logs = c.logs(stream=False, timestamps=True).decode("utf-8", errors="replace")
+        from fastapi.responses import Response as FResponse
+        return FResponse(
+            content=logs, media_type="text/plain",
+            headers={"Content-Disposition": f'attachment; filename="{c.name}.log"'},
+        )
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+
+@app.post("/api/containers/{container_id}/networks/connect")
+def network_connect(container_id: str, body: dict):
+    client = get_docker()
+    network_name = (body.get("network") or "").strip()
+    if not network_name:
+        raise HTTPException(400, "Se requiere 'network'")
+    try:
+        client.networks.get(network_name).connect(container_id)
+        return {"status": "connected"}
+    except docker.errors.NotFound:
+        raise HTTPException(404, "Red no encontrada")
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+
+@app.post("/api/containers/{container_id}/networks/disconnect")
+def network_disconnect(container_id: str, body: dict):
+    client = get_docker()
+    network_name = (body.get("network") or "").strip()
+    if not network_name:
+        raise HTTPException(400, "Se requiere 'network'")
+    try:
+        client.networks.get(network_name).disconnect(container_id)
+        return {"status": "disconnected"}
+    except docker.errors.NotFound:
+        raise HTTPException(404, "Red no encontrada")
     except Exception as e:
         raise HTTPException(500, str(e))
 
 
 def _parse_stats(s: dict) -> dict:
-    # CPU
     cpu_delta = s["cpu_stats"]["cpu_usage"]["total_usage"] - s["precpu_stats"]["cpu_usage"]["total_usage"]
     sys_delta = s["cpu_stats"].get("system_cpu_usage", 0) - s["precpu_stats"].get("system_cpu_usage", 0)
-    num_cpus = s["cpu_stats"].get("online_cpus") or len(s["cpu_stats"]["cpu_usage"].get("percpu_usage", [1]))
-    cpu_pct = (cpu_delta / sys_delta * num_cpus * 100.0) if sys_delta > 0 else 0.0
-
-    # Memory
-    mem = s.get("memory_stats", {})
-    usage = mem.get("usage", 0)
-    cache = mem.get("stats", {}).get("cache", 0)
-    mem_usage = usage - cache
+    num_cpus  = s["cpu_stats"].get("online_cpus") or len(s["cpu_stats"]["cpu_usage"].get("percpu_usage", [1]))
+    cpu_pct   = (cpu_delta / sys_delta * num_cpus * 100.0) if sys_delta > 0 else 0.0
+    mem       = s.get("memory_stats", {})
+    mem_usage = mem.get("usage", 0) - mem.get("stats", {}).get("cache", 0)
     mem_limit = mem.get("limit", 1)
-    mem_pct = (mem_usage / mem_limit * 100) if mem_limit else 0
-
-    # Network
     net_rx, net_tx = 0, 0
     for iface in (s.get("networks") or {}).values():
         net_rx += iface.get("rx_bytes", 0)
         net_tx += iface.get("tx_bytes", 0)
-
     return {
         "cpu_pct": round(cpu_pct, 2),
-        "mem_usage": mem_usage,
-        "mem_limit": mem_limit,
-        "mem_pct": round(mem_pct, 2),
-        "net_rx": net_rx,
-        "net_tx": net_tx,
+        "mem_usage": mem_usage, "mem_limit": mem_limit,
+        "mem_pct": round((mem_usage / mem_limit * 100) if mem_limit else 0, 2),
+        "net_rx": net_rx, "net_tx": net_tx,
     }
 
 
 # ── Images ────────────────────────────────────────────────────────────────────
-
 @app.get("/api/images")
 def list_images():
     client = get_docker()
-    result = []
-    for img in client.images.list():
-        result.append({
-            "id": img.short_id.replace("sha256:", ""),
-            "tags": img.tags,
-            "size_mb": round(img.attrs["Size"] / (1024 ** 2), 1),
-            "created": img.attrs["Created"][:10],
-        })
-    return result
+    return [
+        {"id": img.short_id.replace("sha256:", ""), "tags": img.tags,
+         "size_mb": round(img.attrs["Size"] / (1024**2), 1), "created": img.attrs["Created"][:10]}
+        for img in client.images.list()
+    ]
 
 
 @app.delete("/api/images/{image_id}")
@@ -251,32 +544,41 @@ def remove_image(image_id: str):
 
 @app.post("/api/images/pull")
 def pull_image(body: dict):
-    tag = body.get("tag", "")
-    if not tag:
-        raise HTTPException(400, "Se requiere 'tag'")
-    client = get_docker()
+    tag = (body.get("tag") or "").strip()
+    if not tag or len(tag) > 256:
+        raise HTTPException(400, "Tag inválido")
     try:
-        client.images.pull(tag)
+        get_docker().images.pull(tag)
         return {"status": "pulled", "tag": tag}
     except Exception as e:
         raise HTTPException(500, str(e))
 
 
-# ── Volumes ───────────────────────────────────────────────────────────────────
+@app.get("/api/images/{image_id}/history")
+def image_history(image_id: str):
+    client = get_docker()
+    try:
+        return [
+            {"created_by": (h.get("CreatedBy") or "").replace("/bin/sh -c #(nop) ", "").strip()[:120],
+             "size": h.get("Size", 0), "tags": h.get("Tags") or []}
+            for h in client.api.history(image_id)
+        ]
+    except docker.errors.ImageNotFound:
+        raise HTTPException(404, "Imagen no encontrada")
+    except Exception as e:
+        raise HTTPException(500, str(e))
 
+
+# ── Volumes ───────────────────────────────────────────────────────────────────
 @app.get("/api/volumes")
 def list_volumes():
     client = get_docker()
-    result = []
-    for v in client.volumes.list():
-        result.append({
-            "name": v.name,
-            "driver": v.attrs.get("Driver", ""),
-            "mountpoint": v.attrs.get("Mountpoint", ""),
-            "created": (v.attrs.get("CreatedAt") or "")[:10],
-            "labels": v.attrs.get("Labels") or {},
-        })
-    return result
+    return [
+        {"name": v.name, "driver": v.attrs.get("Driver", ""),
+         "mountpoint": v.attrs.get("Mountpoint", ""),
+         "created": (v.attrs.get("CreatedAt") or "")[:10], "labels": v.attrs.get("Labels") or {}}
+        for v in client.volumes.list()
+    ]
 
 
 @app.delete("/api/volumes/{volume_name}")
@@ -292,7 +594,6 @@ def remove_volume(volume_name: str):
 
 
 # ── Networks ──────────────────────────────────────────────────────────────────
-
 @app.get("/api/networks")
 def list_networks():
     client = get_docker()
@@ -300,15 +601,10 @@ def list_networks():
     for n in client.networks.list():
         a = n.attrs
         ipam = a.get("IPAM", {}).get("Config") or []
-        subnet = ipam[0].get("Subnet", "") if ipam else ""
         result.append({
-            "id": a["Id"][:12],
-            "name": n.name,
-            "driver": a.get("Driver", ""),
-            "scope": a.get("Scope", ""),
-            "subnet": subnet,
-            "internal": a.get("Internal", False),
-            "containers": len(a.get("Containers") or {}),
+            "id": a["Id"][:12], "name": n.name, "driver": a.get("Driver", ""),
+            "scope": a.get("Scope", ""), "subnet": ipam[0].get("Subnet", "") if ipam else "",
+            "internal": a.get("Internal", False), "containers": len(a.get("Containers") or {}),
         })
     return result
 
@@ -326,7 +622,6 @@ def remove_network(network_id: str):
 
 
 # ── System ────────────────────────────────────────────────────────────────────
-
 @app.get("/api/system/info")
 def system_info():
     client = get_docker()
@@ -339,21 +634,16 @@ def system_info():
         except Exception:
             pass
         return {
-            "docker_version": version.get("Version", ""),
-            "api_version": version.get("ApiVersion", ""),
-            "os": info.get("OperatingSystem", ""),
-            "kernel": info.get("KernelVersion", ""),
-            "arch": info.get("Architecture", ""),
-            "hostname": info.get("Name", ""),
-            "host_ip": host_ip,
-            "cpus": info.get("NCPU", 0),
-            "memory_gb": round(info.get("MemTotal", 0) / (1024 ** 3), 2),
+            "docker_version": version.get("Version", ""), "api_version": version.get("ApiVersion", ""),
+            "os": info.get("OperatingSystem", ""), "kernel": info.get("KernelVersion", ""),
+            "arch": info.get("Architecture", ""), "hostname": info.get("Name", ""),
+            "host_ip": host_ip, "cpus": info.get("NCPU", 0),
+            "memory_gb": round(info.get("MemTotal", 0) / (1024**3), 2),
             "containers_running": info.get("ContainersRunning", 0),
             "containers_stopped": info.get("ContainersStopped", 0),
             "containers_paused": info.get("ContainersPaused", 0),
             "images": info.get("Images", 0),
-            "storage_driver": info.get("Driver", ""),
-            "logging_driver": info.get("LoggingDriver", ""),
+            "storage_driver": info.get("Driver", ""), "logging_driver": info.get("LoggingDriver", ""),
         }
     except Exception as e:
         raise HTTPException(500, str(e))
@@ -361,16 +651,12 @@ def system_info():
 
 @app.get("/api/system/host")
 def host_stats():
-    cpu = psutil.cpu_percent(interval=0.3)
-    mem = psutil.virtual_memory()
+    cpu  = psutil.cpu_percent(interval=0.3)
+    mem  = psutil.virtual_memory()
     disk = psutil.disk_usage("/")
     return {
-        "cpu_pct": cpu,
-        "mem_total": mem.total,
-        "mem_used": mem.used,
-        "mem_pct": mem.percent,
-        "disk_total": disk.total,
-        "disk_used": disk.used,
+        "cpu_pct": cpu, "mem_total": mem.total, "mem_used": mem.used, "mem_pct": mem.percent,
+        "disk_total": disk.total, "disk_used": disk.used,
         "disk_pct": round(disk.used / disk.total * 100, 1),
     }
 
@@ -379,33 +665,29 @@ def host_stats():
 def system_prune():
     client = get_docker()
     try:
-        c_result = client.containers.prune()
-        i_result = client.images.prune(filters={"dangling": True})
-        v_result = client.volumes.prune()
-        n_result = client.networks.prune()
-        freed = (
-            (c_result.get("SpaceReclaimed") or 0)
-            + (i_result.get("SpaceReclaimed") or 0)
-            + (v_result.get("SpaceReclaimed") or 0)
-        )
+        c_r = client.containers.prune()
+        i_r = client.images.prune(filters={"dangling": True})
+        v_r = client.volumes.prune()
+        n_r = client.networks.prune()
+        freed = (c_r.get("SpaceReclaimed") or 0) + (i_r.get("SpaceReclaimed") or 0) + (v_r.get("SpaceReclaimed") or 0)
         return {
-            "status": "ok",
-            "freed_bytes": freed,
-            "freed_mb": round(freed / (1024 ** 2), 1),
-            "containers_deleted": len(c_result.get("ContainersDeleted") or []),
-            "images_deleted": len(i_result.get("ImagesDeleted") or []),
-            "volumes_deleted": len(v_result.get("VolumesDeleted") or []),
-            "networks_deleted": len(n_result.get("NetworksDeleted") or []),
+            "status": "ok", "freed_mb": round(freed / (1024**2), 1),
+            "containers_deleted": len(c_r.get("ContainersDeleted") or []),
+            "images_deleted": len(i_r.get("ImagesDeleted") or []),
+            "volumes_deleted": len(v_r.get("VolumesDeleted") or []),
+            "networks_deleted": len(n_r.get("NetworksDeleted") or []),
         }
     except Exception as e:
         raise HTTPException(500, str(e))
 
 
 # ── WebSockets ────────────────────────────────────────────────────────────────
-
 @app.websocket("/ws/containers/{container_id}/logs")
 async def container_logs_ws(websocket: WebSocket, container_id: str):
     await websocket.accept()
+    if not _ws_auth(websocket):
+        await websocket.close(code=4001)
+        return
     loop = asyncio.get_event_loop()
     queue: asyncio.Queue = asyncio.Queue()
     stop_event = threading.Event()
@@ -414,22 +696,76 @@ async def container_logs_ws(websocket: WebSocket, container_id: str):
         try:
             client = docker.from_env()
             container = client.containers.get(container_id)
-            for chunk in container.logs(stream=True, follow=True, tail=300):
-                if stop_event.is_set():
-                    break
+            # Logs históricos primero (timestamps, sin follow)
+            hist = container.logs(stream=False, timestamps=True, tail=500)
+            if hist:
                 asyncio.run_coroutine_threadsafe(
-                    queue.put(chunk.decode("utf-8", errors="replace")), loop
+                    queue.put(hist.decode("utf-8", errors="replace")), loop
                 )
+            # Luego seguimiento en vivo si el contenedor corre
+            container.reload()
+            if container.status == "running":
+                for chunk in container.logs(stream=True, follow=True, tail=0, timestamps=True):
+                    if stop_event.is_set():
+                        break
+                    asyncio.run_coroutine_threadsafe(
+                        queue.put(chunk.decode("utf-8", errors="replace")), loop
+                    )
         except Exception as e:
             asyncio.run_coroutine_threadsafe(queue.put(f"\n[Error: {e}]\n"), loop)
         finally:
             asyncio.run_coroutine_threadsafe(queue.put(None), loop)
 
     threading.Thread(target=produce, daemon=True).start()
-
     try:
         while True:
-            msg = await asyncio.wait_for(queue.get(), timeout=60.0)
+            try:
+                msg = await asyncio.wait_for(queue.get(), timeout=30.0)
+            except asyncio.TimeoutError:
+                # Contenedor en silencio: mantener la conexión viva
+                try:
+                    await websocket.send_text("")
+                except Exception:
+                    break
+                continue
+            if msg is None:
+                break
+            await websocket.send_text(msg)
+    except (WebSocketDisconnect, Exception):
+        pass
+    finally:
+        stop_event.set()
+
+
+@app.websocket("/ws/containers/{container_id}/stats")
+async def container_stats_ws(websocket: WebSocket, container_id: str):
+    await websocket.accept()
+    if not _ws_auth(websocket):
+        await websocket.close(code=4001)
+        return
+    loop = asyncio.get_event_loop()
+    queue: asyncio.Queue = asyncio.Queue()
+    stop_event = threading.Event()
+
+    def produce():
+        try:
+            client = docker.from_env()
+            for s in client.containers.get(container_id).stats(stream=True, decode=True):
+                if stop_event.is_set():
+                    break
+                try:
+                    asyncio.run_coroutine_threadsafe(queue.put(json.dumps(_parse_stats(s))), loop)
+                except Exception:
+                    pass
+        except Exception as e:
+            asyncio.run_coroutine_threadsafe(queue.put(json.dumps({"error": str(e)})), loop)
+        finally:
+            asyncio.run_coroutine_threadsafe(queue.put(None), loop)
+
+    threading.Thread(target=produce, daemon=True).start()
+    try:
+        while True:
+            msg = await asyncio.wait_for(queue.get(), timeout=10.0)
             if msg is None:
                 break
             await websocket.send_text(msg)
@@ -439,39 +775,100 @@ async def container_logs_ws(websocket: WebSocket, container_id: str):
         stop_event.set()
 
 
-@app.websocket("/ws/containers/{container_id}/stats")
-async def container_stats_ws(websocket: WebSocket, container_id: str):
+@app.websocket("/ws/containers/{container_id}/exec")
+async def container_exec_ws(websocket: WebSocket, container_id: str):
     await websocket.accept()
-    loop = asyncio.get_event_loop()
-    queue: asyncio.Queue = asyncio.Queue()
-    stop_event = threading.Event()
+    if not _ws_auth(websocket):
+        await websocket.close(code=4001)
+        return
 
-    def produce():
+    loop = asyncio.get_event_loop()
+    out_queue: asyncio.Queue = asyncio.Queue()
+    in_queue: thread_queue.Queue = thread_queue.Queue()
+    stop_event = threading.Event()
+    exec_info: dict = {}
+
+    def exec_thread():
         try:
             client = docker.from_env()
             container = client.containers.get(container_id)
-            for s in container.stats(stream=True, decode=True):
-                if stop_event.is_set():
-                    break
+            eid = client.api.exec_create(
+                container.id,
+                cmd=["/bin/sh", "-c", "command -v bash > /dev/null 2>&1 && exec bash || exec sh"],
+                stdin=True, stdout=True, stderr=True, tty=True,
+                environment={"TERM": "xterm-256color"},
+            )
+            exec_info["id"] = eid["Id"]
+            exec_info["client"] = client
+            sock = client.api.exec_start(eid["Id"], socket=True, tty=True)
+            raw = getattr(sock, "_sock", None)
+            if raw is None and hasattr(sock, "raw"):
+                raw = getattr(sock.raw, "_sock", None)
+            if raw is None:
+                raise Exception("No se pudo obtener el socket del exec")
+            raw.setblocking(False)
+            while not stop_event.is_set():
+                r, _, _ = sel.select([raw], [], [], 0.05)
+                if r:
+                    try:
+                        data = raw.recv(4096)
+                        if not data:
+                            break
+                        asyncio.run_coroutine_threadsafe(out_queue.put(data), loop)
+                    except Exception:
+                        break
                 try:
-                    parsed = _parse_stats(s)
-                    asyncio.run_coroutine_threadsafe(queue.put(json.dumps(parsed)), loop)
-                except Exception:
+                    inp = in_queue.get_nowait()
+                    raw.sendall(inp)
+                except thread_queue.Empty:
                     pass
         except Exception as e:
-            asyncio.run_coroutine_threadsafe(queue.put(json.dumps({"error": str(e)})), loop)
+            asyncio.run_coroutine_threadsafe(
+                out_queue.put(f"\r\n\x1b[31m[Error: {e}]\x1b[0m\r\n".encode()), loop
+            )
         finally:
-            asyncio.run_coroutine_threadsafe(queue.put(None), loop)
+            asyncio.run_coroutine_threadsafe(out_queue.put(None), loop)
 
-    threading.Thread(target=produce, daemon=True).start()
+    threading.Thread(target=exec_thread, daemon=True).start()
+
+    async def send_loop():
+        while True:
+            data = await out_queue.get()
+            if data is None:
+                break
+            if isinstance(data, bytes):
+                await websocket.send_bytes(data)
+            else:
+                await websocket.send_text(data)
+
+    async def recv_loop():
+        while True:
+            try:
+                msg = await asyncio.wait_for(websocket.receive(), timeout=60.0)
+                if msg.get("type") == "websocket.disconnect":
+                    break
+                if msg.get("bytes"):
+                    in_queue.put(msg["bytes"])
+                elif msg.get("text"):
+                    try:
+                        data = json.loads(msg["text"])
+                        if data.get("type") == "resize" and "id" in exec_info:
+                            exec_info["client"].api.exec_resize(
+                                exec_info["id"], height=data.get("rows", 24), width=data.get("cols", 80),
+                            )
+                        elif data.get("type") == "input":
+                            in_queue.put(data["data"].encode())
+                    except (json.JSONDecodeError, Exception):
+                        in_queue.put(msg["text"].encode())
+            except asyncio.TimeoutError:
+                pass
+            except Exception:
+                break
+        stop_event.set()
 
     try:
-        while True:
-            msg = await asyncio.wait_for(queue.get(), timeout=10.0)
-            if msg is None:
-                break
-            await websocket.send_text(msg)
-    except (WebSocketDisconnect, asyncio.TimeoutError, Exception):
+        await asyncio.gather(send_loop(), recv_loop())
+    except Exception:
         pass
     finally:
         stop_event.set()
