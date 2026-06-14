@@ -1,5 +1,7 @@
 # DockerManager
 
+> 🇬🇧 English | [🇪🇸 Español](docs/README.es.md)
+
 A lightweight web interface for managing Docker from the browser. Built with FastAPI and vanilla JavaScript — no frontend frameworks, no external runtime dependencies.
 
 ![Python](https://img.shields.io/badge/Python-3.12-blue) ![FastAPI](https://img.shields.io/badge/FastAPI-0.115-green) ![Docker](https://img.shields.io/badge/Docker-SDK-blue)
