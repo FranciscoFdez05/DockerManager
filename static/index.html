@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Docker Gestor</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header>
+    <div class="header-left">
+      <svg width="28" height="28" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <rect x="2" y="14" width="6" height="5" rx="1" fill="#58a6ff"/>
+        <rect x="10" y="14" width="6" height="5" rx="1" fill="#58a6ff"/>
+        <rect x="18" y="14" width="6" height="5" rx="1" fill="#58a6ff"/>
+        <rect x="10" y="7" width="6" height="5" rx="1" fill="#58a6ff"/>
+        <rect x="18" y="7" width="6" height="5" rx="1" fill="#58a6ff"/>
+        <path d="M28 17c1-1 2-3 1-5s-3-3-5-2H23c-1-5-5-8-10-7" stroke="#58a6ff" stroke-width="1.5" stroke-linecap="round"/>
+        <path d="M2 19c0 3 2 5 5 5h18c3 0 5-2 4-5" stroke="#58a6ff" stroke-width="1.5" stroke-linecap="round"/>
+      </svg>
+      <h1>Docker Gestor</h1>
+    </div>
+    <div class="header-right">
+      <div id="host-stats-bar" class="host-stats-bar"></div>
+      <span id="docker-status" class="status-badge">Conectando...</span>
+      <button onclick="openSystemInfo()">&#x2139;&#xFE0F; Sistema</button>
+      <button onclick="confirmPrune()" class="btn-yellow">&#x1F9F9; Prune</button>
+      <button id="refresh-btn" onclick="loadAll()">&#x21BA; Actualizar</button>
+    </div>
+  </header>
+
+  <main>
+    <!-- Contenedores -->
+    <section class="section">
+      <div class="section-header">
+        <h2>Contenedores</h2>
+        <span id="container-count" class="count-badge"></span>
+      </div>
+      <div class="table-wrapper">
+        <table>
+          <thead>
+            <tr>
+              <th>Nombre</th>
+              <th>Imagen</th>
+              <th>Estado</th>
+              <th>Puertos</th>
+              <th>CPU / RAM</th>
+              <th>Acciones</th>
+            </tr>
+          </thead>
+          <tbody id="containers-body">
+            <tr><td colspan="6" class="empty">Cargando...</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- Imágenes -->
+    <section class="section">
+      <div class="section-header">
+        <h2>Im&aacute;genes</h2>
+        <span id="image-count" class="count-badge"></span>
+        <button class="btn-accent" style="margin-left:8px" onclick="openPullModal()">&#x2B07; Pull imagen</button>
+      </div>
+      <div class="table-wrapper">
+        <table>
+          <thead>
+            <tr>
+              <th>Nombre / Tag</th>
+              <th>ID</th>
+              <th>Tama&ntilde;o</th>
+              <th>Creada</th>
+              <th>Acciones</th>
+            </tr>
+          </thead>
+          <tbody id="images-body">
+            <tr><td colspan="5" class="empty">Cargando...</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- Volúmenes -->
+    <section class="section">
+      <div class="section-header">
+        <h2>Vol&uacute;menes</h2>
+        <span id="volume-count" class="count-badge"></span>
+      </div>
+      <div class="table-wrapper">
+        <table>
+          <thead>
+            <tr>
+              <th>Nombre</th>
+              <th>Driver</th>
+              <th>Punto de montaje</th>
+              <th>Creado</th>
+              <th>Acciones</th>
+            </tr>
+          </thead>
+          <tbody id="volumes-body">
+            <tr><td colspan="5" class="empty">Cargando...</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- Redes -->
+    <section class="section">
+      <div class="section-header">
+        <h2>Redes</h2>
+        <span id="network-count" class="count-badge"></span>
+      </div>
+      <div class="table-wrapper">
+        <table>
+          <thead>
+            <tr>
+              <th>Nombre</th>
+              <th>Driver</th>
+              <th>Subred</th>
+              <th>Scope</th>
+              <th>Contenedores</th>
+              <th>Acciones</th>
+            </tr>
+          </thead>
+          <tbody id="networks-body">
+            <tr><td colspan="6" class="empty">Cargando...</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+
+  <!-- Modal: Logs -->
+  <div id="log-modal" class="modal hidden">
+    <div class="modal-content">
+      <div class="modal-header">
+        <div class="modal-title">
+          <span class="modal-label">Logs</span>
+          <span id="log-container-name"></span>
+        </div>
+        <div class="modal-actions">
+          <label class="autoscroll-label">
+            <input type="checkbox" id="autoscroll-toggle" checked>
+            Auto-scroll
+          </label>
+          <button onclick="clearLogs()">Limpiar</button>
+          <button class="btn-close" onclick="closeModal('log-modal')">&#x2715; Cerrar</button>
+        </div>
+      </div>
+      <div id="log-output" class="log-output"></div>
+    </div>
+  </div>
+
+  <!-- Modal: Stats live -->
+  <div id="stats-modal" class="modal hidden">
+    <div class="modal-content modal-sm">
+      <div class="modal-header">
+        <div class="modal-title">
+          <span class="modal-label">Recursos</span>
+          <span id="stats-container-name"></span>
+        </div>
+        <div class="modal-actions">
+          <button class="btn-close" onclick="closeStatsModal()">&#x2715; Cerrar</button>
+        </div>
+      </div>
+      <div class="stats-body">
+        <div class="stat-row">
+          <span class="stat-label">CPU</span>
+          <div class="bar-wrap"><div id="stats-cpu-bar" class="bar bar-cpu"></div></div>
+          <span id="stats-cpu-val" class="stat-val">—</span>
+        </div>
+        <div class="stat-row">
+          <span class="stat-label">RAM</span>
+          <div class="bar-wrap"><div id="stats-mem-bar" class="bar bar-mem"></div></div>
+          <span id="stats-mem-val" class="stat-val">—</span>
+        </div>
+        <div class="stat-row">
+          <span class="stat-label">Red RX</span>
+          <span id="stats-net-rx" class="stat-val">—</span>
+        </div>
+        <div class="stat-row">
+          <span class="stat-label">Red TX</span>
+          <span id="stats-net-tx" class="stat-val">—</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal: Inspect -->
+  <div id="inspect-modal" class="modal hidden">
+    <div class="modal-content modal-lg">
+      <div class="modal-header">
+        <div class="modal-title">
+          <span class="modal-label">Inspect</span>
+          <span id="inspect-container-name"></span>
+        </div>
+        <div class="modal-actions">
+          <button class="btn-close" onclick="closeModal('inspect-modal')">&#x2715; Cerrar</button>
+        </div>
+      </div>
+      <div id="inspect-body" class="inspect-body"></div>
+    </div>
+  </div>
+
+  <!-- Modal: Procesos -->
+  <div id="proc-modal" class="modal hidden">
+    <div class="modal-content">
+      <div class="modal-header">
+        <div class="modal-title">
+          <span class="modal-label">Procesos</span>
+          <span id="proc-container-name"></span>
+        </div>
+        <div class="modal-actions">
+          <button onclick="refreshProcs()">&#x21BA; Actualizar</button>
+          <button class="btn-close" onclick="closeModal('proc-modal')">&#x2715; Cerrar</button>
+        </div>
+      </div>
+      <div id="proc-body" class="proc-body"></div>
+    </div>
+  </div>
+
+  <!-- Modal: Sistema -->
+  <div id="sysinfo-modal" class="modal hidden">
+    <div class="modal-content modal-sm">
+      <div class="modal-header">
+        <div class="modal-title">
+          <span class="modal-label">Sistema Docker</span>
+        </div>
+        <div class="modal-actions">
+          <button class="btn-close" onclick="closeModal('sysinfo-modal')">&#x2715; Cerrar</button>
+        </div>
+      </div>
+      <div id="sysinfo-body" class="inspect-body"></div>
+    </div>
+  </div>
+
+  <!-- Modal: Pull imagen -->
+  <div id="pull-modal" class="modal hidden">
+    <div class="modal-content modal-sm">
+      <div class="modal-header">
+        <div class="modal-title">
+          <span class="modal-label">Pull imagen</span>
+        </div>
+        <div class="modal-actions">
+          <button class="btn-close" onclick="closeModal('pull-modal')">&#x2715; Cerrar</button>
+        </div>
+      </div>
+      <div class="pull-body">
+        <p style="color:var(--dim);font-size:12px;margin-bottom:10px">Ej: nginx:latest, ubuntu:22.04</p>
+        <div style="display:flex;gap:8px">
+          <input id="pull-tag-input" type="text" class="pull-input" placeholder="imagen:tag" />
+          <button class="btn-accent" onclick="doPull()">&#x2B07; Pull</button>
+        </div>
+        <div id="pull-status" style="margin-top:12px;font-size:13px"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Notificaciones toast -->
+  <div id="toast-container"></div>
+
+  <script src="app.js"></script>
+</body>
+</html>
