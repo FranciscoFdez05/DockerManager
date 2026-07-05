@@ -6,6 +6,7 @@ Interfaz web ligera para gestionar Docker desde el navegador. Construida con Fas
 
 ![Python](https://img.shields.io/badge/Python-3.12-blue) ![FastAPI](https://img.shields.io/badge/FastAPI-0.115-green) ![Docker](https://img.shields.io/badge/Docker-SDK-blue)
 
+![alt text](../img/main.png)
 ---
 
 ## Inicio Rápido
