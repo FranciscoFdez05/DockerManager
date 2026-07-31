@@ -1,27 +1,15 @@
 # DockerManager
-
+---
 > [🇬🇧 English](../README.md) | 🇪🇸 Español
 
 Interfaz web ligera para gestionar Docker desde el navegador. Construida con FastAPI y JavaScript puro — sin frameworks de frontend, sin dependencias de runtime externas.
 
 ![Python](https://img.shields.io/badge/Python-3.12-blue) ![FastAPI](https://img.shields.io/badge/FastAPI-0.115-green) ![Docker](https://img.shields.io/badge/Docker-SDK-blue)
 
-![alt text](../img/main.png)
+![Menú principal de DockerManager](../img/mainMenu.png)
+
+## ✨ Características ✨
 ---
-
-## Inicio Rápido
-
-```bash
-git clone https://github.com/FranciscoFdez05/DockerManager.git
-cd DockerManager
-docker compose up -d --build
-```
-
-Abre `http://<ip-del-host>:3000` en el navegador. En el primer inicio se te pedirá crear una cuenta de administrador. Las credenciales se almacenan de forma persistente en un volumen Docker (`dockermanager-data`).
-
----
-
-## Funcionalidades
 
 ### Contenedores
 - Lista todos los contenedores con nombre, imagen, estado, puertos y estadísticas en vivo de CPU/RAM
@@ -61,9 +49,20 @@ Abre `http://<ip-del-host>:3000` en el navegador. En el primer inicio se te pedi
 ### PWA
 Instalable como aplicación de escritorio o móvil desde Chrome, Edge o Safari.
 
+## 🖥️ Requisitos
 ---
 
-## Stack
+- **Docker Engine** con el plugin Compose (`docker compose`) — la vía recomendada
+- Acceso al socket de Docker (`/var/run/docker.sock`)
+- Un shell POSIX (`sh`), además de `awk` y `openssl` (o `/dev/urandom`) para `docker-up.sh`
+- Un puerto TCP libre en el host (por defecto `3000`)
+
+Solo si instalas de forma nativa en vez de con Docker (`install.sh`, Ubuntu + systemd):
+
+- Python 3.12 con `python3-venv`
+- El usuario actual en el grupo `docker`
+
+**Stack**
 
 | Capa | Tecnología |
 |---|---|
@@ -77,16 +76,80 @@ Instalable como aplicación de escritorio o móvil desde Chrome, Edge o Safari.
 | Frontend | HTML + CSS + Vanilla JS |
 | Despliegue | Docker Compose |
 
+## 📦 Guía de instalación ⚙️
 ---
 
-## Estructura del Proyecto
+### Con Docker (recomendado)
+
+```bash
+git clone https://github.com/FranciscoFdez05/DockerManager.git
+cd DockerManager
+./docker-up.sh
+```
+
+`docker-up.sh` crea el `.env` con una `SECRET_KEY` recién generada, lee el puerto de escucha de `[server] port` en `config.ini` y levanta el stack publicado en todas las interfaces. Al terminar imprime la URL de la LAN.
+
+### Instalación nativa (Ubuntu + systemd)
+
+```bash
+bash install.sh
+```
+
+Instala la app en `/opt/dockergestor` con su propio entorno virtual y registra el servicio systemd `dockergestor`.
+
+### Configuración
+
+Todo se ajusta en `config.ini`. Las variables de entorno (`DATA_DIR`, `PORT`, `HOST`, `DOCKER_HOST`) tienen prioridad sobre el archivo.
+
+| Sección | Clave | Por defecto | Descripción |
+|---|---|---|---|
+| `server` | `port` | `3000` | Puerto de escucha |
+| `server` | `bind_host` | `0.0.0.0` | Dirección de bind |
+| `docker` | `data_dir` | `./data` | Dónde se guarda `config.json` (usuario + hash de contraseña) |
+| `docker` | `docker_socket` | `/var/run/docker.sock` | Socket Unix de Docker |
+| `security` | `session_max_age_days` | `30` | Duración de la sesión |
+| `security` | `bcrypt_cost` | `12` | Coste del hash bcrypt |
+| `security` | `max_login_attempts` | `5` | Intentos fallidos antes del bloqueo |
+| `security` | `lockout_minutes` | `15` | Duración del bloqueo |
+
+### Actualización
+
+```bash
+bash update.sh
+```
+
+O manualmente:
+
+```bash
+docker compose down
+./docker-up.sh
+```
+
+## 📋 Guía de uso 🕹️
+---
+
+Abre `http://<ip-del-host>:<puerto>` desde cualquier dispositivo de la misma red (puerto `3000` por defecto; cámbialo en `config.ini` y vuelve a ejecutar el script). En el primer inicio se te pedirá crear una cuenta de administrador. Las credenciales se almacenan de forma persistente en un volumen Docker (`dockermanager-data`).
+
+A partir de ahí:
+
+- **Contenedores** — la tabla principal. Botones por fila para iniciar/detener/reiniciar/pausar; haz clic en un contenedor para abrir logs, terminal, estadísticas o inspección.
+- **Imágenes / Volúmenes / Redes** — pestañas para listar, descargar, inspeccionar y eliminar.
+- **Sistema** — información del host y del demonio, además del botón de limpieza.
+
+Si otro equipo de la red no conecta, abre el puerto en el firewall del servidor.
+
+### Estructura del proyecto
 
 ```
 DockerManager/
 ├── main.py              # App FastAPI: REST API, WebSockets, autenticación
+├── config.py            # Carga de config.ini + variables de entorno
+├── config.ini           # Configuración editable
 ├── requirements.txt
 ├── Dockerfile
 ├── docker-compose.yml
+├── docker-up.sh         # Script de arranque (.env + puerto + compose up)
+├── install.sh           # Instalador nativo (Ubuntu + systemd)
 ├── update.sh
 ├── docs/
 │   └── README.es.md     # Documentación en español
@@ -98,11 +161,9 @@ DockerManager/
     └── manifest.json
 ```
 
----
+### Referencia de la API
 
-## Referencia de la API
-
-### Autenticación
+#### Autenticación
 
 | Método | Ruta | Descripción |
 |---|---|---|
@@ -112,7 +173,7 @@ DockerManager/
 | `POST` | `/api/auth/logout` | Logout |
 | `POST` | `/api/auth/change-password` | Cambiar contraseña |
 
-### Contenedores
+#### Contenedores
 
 | Método | Ruta | Descripción |
 |---|---|---|
@@ -131,7 +192,7 @@ DockerManager/
 | `POST` | `/api/containers/{id}/networks/connect` | Conectar a red |
 | `POST` | `/api/containers/{id}/networks/disconnect` | Desconectar de red |
 
-### Imágenes
+#### Imágenes
 
 | Método | Ruta | Descripción |
 |---|---|---|
@@ -140,7 +201,7 @@ DockerManager/
 | `POST` | `/api/images/pull` | Descargar por etiqueta |
 | `GET` | `/api/images/{id}/history` | Historial de capas |
 
-### Volúmenes, Redes y Sistema
+#### Volúmenes, Redes y Sistema
 
 | Método | Ruta | Descripción |
 |---|---|---|
@@ -152,7 +213,7 @@ DockerManager/
 | `GET` | `/api/system/host` | CPU / RAM / disco |
 | `POST` | `/api/system/prune` | Limpieza del sistema |
 
-### WebSockets
+#### WebSockets
 
 | Ruta | Descripción |
 |---|---|
@@ -160,17 +221,22 @@ DockerManager/
 | `WS /ws/containers/{id}/stats` | Estadísticas CPU / RAM / red (~1 s de intervalo) |
 | `WS /ws/containers/{id}/exec` | Shell interactiva |
 
+## 🤝 Contribuciones 🤝
 ---
 
-## Actualización
+Las contribuciones son bienvenidas. Para proponer un cambio:
 
-```bash
-bash update.sh
-```
+1. Haz un fork del repositorio y crea una rama (`git checkout -b feature/mi-mejora`).
+2. Realiza tus cambios manteniendo el estilo existente (JS puro, sin nuevas dependencias de runtime).
+3. Prueba con `./docker-up.sh` antes de abrir el PR.
+4. Haz commit (`git commit -m "Añade mi mejora"`), push y abre un Pull Request describiendo el cambio.
 
-O manualmente:
+Para errores o ideas, abre un [issue](https://github.com/FranciscoFdez05/DockerManager/issues).
 
-```bash
-docker compose down
-docker compose up -d --build
-```
+## 📜 Licencia
+---
+📄 Este proyecto está licenciado bajo la Licencia MIT. Consulta el archivo `LICENSE` para más detalles.
+
+---
+
+**Developed with ❤️ by [Francisco](https://github.com/FranciscoFdez05)**
