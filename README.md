@@ -16,10 +16,12 @@ A lightweight web interface for managing Docker from the browser. Built with Fas
 ```bash
 git clone https://github.com/FranciscoFdez05/DockerManager.git
 cd DockerManager
-docker compose up -d --build
+./docker-up.sh
 ```
 
-Open `http://<host-ip>:3000` in your browser. On first launch, you will be prompted to create an admin account. Credentials are stored persistently in a Docker volume (`dockermanager-data`).
+`docker-up.sh` creates the `.env` with a freshly generated `SECRET_KEY`, reads the listening port from `[server] port` in `config.ini`, and brings the stack up published on all interfaces. It prints the LAN URL when it finishes.
+
+Open `http://<host-ip>:<port>` from any device on the same network (default port `3000`, change it in `config.ini` and re-run the script). On first launch, you will be prompted to create an admin account. Credentials are stored persistently in a Docker volume (`dockermanager-data`).
 
 ---
 
@@ -172,5 +174,5 @@ Or manually:
 
 ```bash
 docker compose down
-docker compose up -d --build
+./docker-up.sh
 ```

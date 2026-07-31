@@ -11,16 +11,18 @@ import json
 import psutil
 import socket
 import os
+import hashlib
 import secrets
 import select as sel
 import bcrypt
 from collections import defaultdict
 from datetime import datetime, timedelta
+import config as cfg_ini
 
 app = FastAPI(title="DockerManager")
 
 # ── Configuración persistente ─────────────────────────────────────────────────
-DATA_DIR = os.getenv("DATA_DIR", "./data")
+DATA_DIR = cfg_ini.DATA_DIR
 CONFIG_FILE = os.path.join(DATA_DIR, "config.json")
 
 
@@ -43,7 +45,7 @@ def save_config(cfg: dict):
 
 
 def hash_password(password: str) -> str:
-    return bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt(12)).decode("utf-8")
+    return bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt(cfg_ini.BCRYPT_COST)).decode("utf-8")
 
 
 def verify_password(password: str, hashed: str) -> bool:
@@ -54,7 +56,19 @@ def verify_password(password: str, hashed: str) -> bool:
 
 
 # ── Sesión en memoria (se regenera en cada login) ─────────────────────────────
-_session: dict = {"token": secrets.token_hex(32)}
+# El token inicial se deriva de SECRET_KEY (la genera docker-up.sh en el .env)
+# para que reiniciar el contenedor no eche fuera a quien ya estaba dentro. Sin
+# SECRET_KEY se usa un token aleatorio y cada reinicio invalida las sesiones.
+_SECRET_KEY = os.getenv("SECRET_KEY", "")
+
+
+def _initial_token() -> str:
+    if _SECRET_KEY:
+        return hashlib.sha256(f"{_SECRET_KEY}:session".encode("utf-8")).hexdigest()
+    return secrets.token_hex(32)
+
+
+_session: dict = {"token": _initial_token()}
 
 
 def _get_token() -> str:
@@ -69,8 +83,8 @@ def _new_token() -> str:
 # ── Rate limiting anti-fuerza-bruta ───────────────────────────────────────────
 _rate_lock = threading.Lock()
 _attempts: dict[str, list] = defaultdict(list)
-MAX_ATTEMPTS = 5
-LOCKOUT_MIN = 15
+MAX_ATTEMPTS = cfg_ini.MAX_LOGIN_ATTEMPTS
+LOCKOUT_MIN = cfg_ini.LOCKOUT_MINUTES
 
 
 def _is_locked(ip: str) -> bool:
@@ -105,11 +119,12 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         response.headers["X-Frame-Options"] = "DENY"
         response.headers["X-XSS-Protection"] = "1; mode=block"
         response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+        cdn = cfg_ini.CDN_JSDELIVR
         response.headers["Content-Security-Policy"] = (
             "default-src 'self'; "
-            "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "
-            "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "
-            "font-src 'self' https://cdn.jsdelivr.net data:; "
+            f"script-src 'self' 'unsafe-inline' {cdn}; "
+            f"style-src 'self' 'unsafe-inline' {cdn}; "
+            f"font-src 'self' {cdn} data:; "
             "img-src 'self' data:; "
             "connect-src 'self' ws: wss:;"
         )
@@ -127,7 +142,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
         cfg = load_config()
         if not cfg:
             return JSONResponse({"detail": "Setup requerido"}, status_code=403)
-        if request.cookies.get("dm_session") != _get_token():
+        if request.cookies.get(cfg_ini.SESSION_COOKIE_NAME) != _get_token():
             return JSONResponse({"detail": "No autorizado"}, status_code=401)
         return await call_next(request)
 
@@ -142,7 +157,7 @@ def auth_status(request: Request):
     cfg = load_config()
     if not cfg:
         return {"setup_needed": True, "authenticated": False}
-    authenticated = request.cookies.get("dm_session") == _get_token()
+    authenticated = request.cookies.get(cfg_ini.SESSION_COOKIE_NAME) == _get_token()
     return {"setup_needed": False, "authenticated": authenticated}
 
 
@@ -166,7 +181,8 @@ def auth_setup(body: dict, response: Response):
 
     save_config({"username": username, "password_hash": hash_password(password)})
     token = _new_token()
-    response.set_cookie("dm_session", token, httponly=True, samesite="strict", max_age=86400 * 30)
+    response.set_cookie(cfg_ini.SESSION_COOKIE_NAME, token, httponly=True, samesite="strict",
+                        max_age=cfg_ini.SESSION_MAX_AGE_SECONDS)
     return {"ok": True}
 
 
@@ -193,14 +209,15 @@ def auth_login(body: dict, response: Response, request: Request):
 
     _clear_attempts(ip)
     token = _new_token()  # Regenerar token en cada login (anti session-fixation)
-    response.set_cookie("dm_session", token, httponly=True, samesite="strict", max_age=86400 * 30)
+    response.set_cookie(cfg_ini.SESSION_COOKIE_NAME, token, httponly=True, samesite="strict",
+                        max_age=cfg_ini.SESSION_MAX_AGE_SECONDS)
     return {"ok": True}
 
 
 @app.post("/api/auth/logout")
 def auth_logout(response: Response):
     _new_token()  # Invalida la sesión actual
-    response.delete_cookie("dm_session")
+    response.delete_cookie(cfg_ini.SESSION_COOKIE_NAME)
     return {"ok": True}
 
 
@@ -245,7 +262,7 @@ def _ws_auth(websocket: WebSocket) -> bool:
     cfg = load_config()
     if not cfg:
         return False
-    return websocket.cookies.get("dm_session") == _get_token()
+    return websocket.cookies.get(cfg_ini.SESSION_COOKIE_NAME) == _get_token()
 
 
 # ── Containers ────────────────────────────────────────────────────────────────
@@ -875,3 +892,8 @@ async def container_exec_ws(websocket: WebSocket, container_id: str):
 
 
 app.mount("/", StaticFiles(directory="static", html=True), name="static")
+
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host=cfg_ini.BIND_HOST, port=cfg_ini.PORT)

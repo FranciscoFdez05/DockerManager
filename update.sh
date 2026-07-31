@@ -5,6 +5,7 @@ cd "$(dirname "$0")"
 
 echo "Actualizando DockerManager..."
 docker compose down
-docker compose up -d --build
+# Vía docker-up.sh para que el puerto siga saliendo de config.ini
+./docker-up.sh
 echo ""
 docker compose ps

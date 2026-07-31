@@ -281,48 +281,59 @@ function renderContainers(list) {
     const cls = STATUS_CLASS[c.status] || 's-other';
     const label = STATUS_LABELS[c.status] || c.status;
 
-    const portEntries = Object.entries(c.ports || {}).flatMap(([k, v]) =>
-      v.map(p => ({ host: p, container: k.split('/')[0] }))
-    );
+    // Docker publica el mismo puerto una vez por familia IP (v4 y v6): deduplicamos
+    const portEntries = [...new Map(
+      Object.entries(c.ports || {}).flatMap(([k, v]) =>
+        v.map(p => [`${p}:${k}`, { host: p, container: k.split('/')[0] }])
+      )
+    ).values()];
     const ports = portEntries.length
       ? portEntries.map(p =>
-          `<a class="port-tag port-link" href="http://${location.hostname}:${esc(p.host)}" target="_blank">${esc(p.host)}&#8594;${esc(p.container)}</a>`
+          `<a class="port-tag port-link" href="http://${location.hostname}:${esc(p.host)}" target="_blank" title="Abrir puerto ${esc(p.host)}">${esc(p.host)}&#8594;${esc(p.container)}</a>`
         ).join('')
       : '<span class="dim">—</span>';
 
-    const btn = (cls, icon, op, label) =>
-      `<button class="${cls}" onclick="action('${c.id}','${op}')">${icon} ${label}</button>`;
-    const logBtn    = `<button class="btn-accent" onclick="openLogs('${c.id}','${esc(c.name)}')">&#x1F4CB; Logs</button>`;
-    const statsBtn  = `<button class="btn-accent" onclick="openStats('${c.id}','${esc(c.name)}')">&#x1F4CA; Stats</button>`;
-    const inspBtn   = `<button onclick="openInspect('${c.id}','${esc(c.name)}')">&#x1F50D; Inspect</button>`;
-    const procsBtn  = `<button onclick="openProcs('${c.id}','${esc(c.name)}')">&#x1F9F5; Procesos</button>`;
-    const termBtn   = `<button class="btn-yellow" onclick="openTerminal('${c.id}','${esc(c.name)}')">&#x1F5A5; Terminal</button>`;
+    // Cada acción va en una ranura fija de la rejilla → columnas alineadas entre filas
+    const icon = (slot, cls, glyph, title, onclick) =>
+      `<button class="icon-btn ${cls}" style="grid-column:${slot}" title="${title}" aria-label="${title}" onclick="${onclick}">${glyph}</button>`;
+    const op = (slot, cls, glyph, name, title) =>
+      icon(slot, cls, glyph, title, `action('${c.id}','${name}')`);
+
+    const logBtn   = icon(5, 'btn-accent', '&#x1F4CB;', 'Logs',      `openLogs('${c.id}','${esc(c.name)}')`);
+    const statsBtn = icon(6, 'btn-accent', '&#x1F4CA;', 'Stats',     `openStats('${c.id}','${esc(c.name)}')`);
+    const inspBtn  = icon(7, '',           '&#x1F50D;', 'Inspect',   `openInspect('${c.id}','${esc(c.name)}')`);
+    const procsBtn = icon(8, '',           '&#x1F9F5;', 'Procesos',  `openProcs('${c.id}','${esc(c.name)}')`);
+    const termBtn  = icon(9, 'btn-yellow', '&#x1F5A5;', 'Terminal',  `openTerminal('${c.id}','${esc(c.name)}')`);
+    const rmBtn    = op(11, 'btn-red', '&#x1F5D1;', 'remove', 'Eliminar');
+    const sep      = col => `<span class="act-sep" style="grid-column:${col}"></span>`;
 
     let acts;
     if (isPaused) {
-      acts = [btn('btn-yellow','&#x25B6;','unpause','Unpause'), logBtn, inspBtn,
-              btn('btn-red','&#x1F5D1;','remove','Remove')].join('');
+      acts = [op(3, 'btn-yellow', '&#x25B6;', 'unpause', 'Reanudar'),
+              logBtn, inspBtn, rmBtn];
     } else if (isRunning) {
-      acts = [btn('btn-red','&#x23F9;','stop','Stop'),
-              btn('btn-yellow','&#x21BA;','restart','Restart'),
-              btn('btn-yellow','&#x23F8;','pause','Pause'),
-              logBtn, statsBtn, inspBtn, procsBtn, termBtn].join('');
+      acts = [op(1, 'btn-red',    '&#x23F9;', 'stop',    'Detener'),
+              op(2, 'btn-yellow', '&#x21BA;', 'restart', 'Reiniciar'),
+              op(3, 'btn-yellow', '&#x23F8;', 'pause',   'Pausar'),
+              logBtn, statsBtn, inspBtn, procsBtn, termBtn];
     } else {
-      acts = [btn('btn-green','&#x25B6;','start','Start'), logBtn, inspBtn,
-              btn('btn-red','&#x1F5D1;','remove','Remove')].join('');
+      acts = [op(1, 'btn-green', '&#x25B6;', 'start', 'Iniciar'),
+              logBtn, inspBtn, rmBtn];
     }
+    // El separador final solo si hay algo detrás de él
+    acts = acts.join('') + sep(4) + (acts.includes(rmBtn) ? sep(10) : '');
 
     const statsCell = isRunning
       ? `<span class="mini-stats" id="mstat-${c.id}">—</span>`
       : `<span class="dim">—</span>`;
 
     return `<tr data-name="${esc(c.name.toLowerCase())}">
-      <td><span class="mono">${esc(c.name)}</span></td>
-      <td><span class="mono dim">${esc(c.image)}</span></td>
+      <td title="${esc(c.name)}"><span class="mono cell-name">${esc(c.name)}</span></td>
+      <td title="${esc(c.image)}"><span class="mono dim">${esc(c.image)}</span></td>
       <td><span class="status-dot ${cls}">${label}</span></td>
       <td>${ports}</td>
       <td>${statsCell}</td>
-      <td><div class="actions">${acts}</div></td>
+      <td class="col-actions"><div class="actions actions-grid">${acts}</div></td>
     </tr>`;
   }).join('');
 
@@ -362,9 +373,9 @@ function renderImages(list) {
       <td><span class="mono dim">${esc(img.id)}</span></td>
       <td>${img.size_mb} MB</td>
       <td>${img.created}</td>
-      <td><div class="actions">
-        <button onclick="openHistory('${esc(img.id)}','${esc(img.tags[0] || img.id)}')">&#x1F4DC; Historial</button>
-        <button class="btn-red" onclick="removeImage('${esc(img.id)}')">&#x1F5D1; Remove</button>
+      <td class="col-actions"><div class="actions">
+        <button class="icon-btn" title="Historial" aria-label="Historial" onclick="openHistory('${esc(img.id)}','${esc(img.tags[0] || img.id)}')">&#x1F4DC;</button>
+        <button class="icon-btn btn-red" title="Eliminar" aria-label="Eliminar" onclick="removeImage('${esc(img.id)}')">&#x1F5D1;</button>
       </div></td>
     </tr>`;
   }).join('');
@@ -379,10 +390,10 @@ function renderVolumes(list) {
   q('volumes-body').innerHTML = list.map(v => `<tr>
     <td><span class="mono">${esc(v.name)}</span></td>
     <td><span class="dim">${esc(v.driver)}</span></td>
-    <td><span class="mono dim" style="font-size:11px">${esc(v.mountpoint)}</span></td>
+    <td title="${esc(v.mountpoint)}"><span class="mono dim" style="font-size:11px">${esc(v.mountpoint)}</span></td>
     <td>${v.created || '—'}</td>
-    <td><div class="actions">
-      <button class="btn-red" onclick="removeVolume('${esc(v.name)}')">&#x1F5D1; Remove</button>
+    <td class="col-actions"><div class="actions">
+      <button class="icon-btn btn-red" title="Eliminar" aria-label="Eliminar" onclick="removeVolume('${esc(v.name)}')">&#x1F5D1;</button>
     </div></td>
   </tr>`).join('');
 }
@@ -399,8 +410,8 @@ function renderNetworks(list) {
     <td><span class="mono dim">${esc(n.subnet) || '—'}</span></td>
     <td>${esc(n.scope)}</td>
     <td>${n.containers}</td>
-    <td><div class="actions">
-      <button class="btn-red" onclick="removeNetwork('${esc(n.id)}','${esc(n.name)}')">&#x1F5D1; Remove</button>
+    <td class="col-actions"><div class="actions">
+      <button class="icon-btn btn-red" title="Eliminar" aria-label="Eliminar" onclick="removeNetwork('${esc(n.id)}','${esc(n.name)}')">&#x1F5D1;</button>
     </div></td>
   </tr>`).join('');
 }

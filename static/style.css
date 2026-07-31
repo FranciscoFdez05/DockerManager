@@ -81,8 +81,20 @@ button:active { transform: scale(0.97); }
 .btn-close:hover  { background: rgba(248,81,73,.12); }
 .btn-xs { padding: 3px 8px; font-size: 11px; }
 
+/* Botón cuadrado solo-icono para las tablas */
+.icon-btn {
+  width: 30px;
+  height: 28px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 13px;
+  line-height: 1;
+}
+
 /* ── Layout ───────────────────────────────── */
-main { padding: 28px 24px; max-width: 1600px; margin: 0 auto; }
+main { padding: 28px 24px; max-width: 1800px; margin: 0 auto; }
 .section { margin-bottom: 36px; }
 .section-header {
   display: flex;
@@ -122,6 +134,7 @@ h2 { font-size: 15px; font-weight: 600; }
   overflow-x: auto;
 }
 table { width: 100%; border-collapse: collapse; background: var(--surface); min-width: 600px; table-layout: fixed; }
+#containers-table { min-width: 1080px; }
 thead th {
   background: var(--surface2);
   padding: 9px 16px;
@@ -136,23 +149,27 @@ thead th {
 }
 tbody tr { border-bottom: 1px solid var(--border); transition: background .1s; }
 tbody tr:last-child { border-bottom: none; }
-tbody tr:hover { background: rgba(255,255,255,.025); }
-td { padding: 10px 16px; vertical-align: middle; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+tbody tr:hover { background: rgba(255,255,255,.04); }
+td { padding: 9px 16px; vertical-align: middle; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 td .actions { white-space: normal; overflow: visible; }
 td .port-tag { white-space: nowrap; }
 .empty { text-align: center; color: var(--dim); padding: 36px !important; font-style: italic; }
 
+/* La columna de acciones se ajusta a los botones en vez de estirarse */
+th.col-actions, td.col-actions { width: 110px; white-space: nowrap; }
+
 /* Container table column widths */
-#containers-table td:nth-child(1), #containers-table th:nth-child(1) { width: 15%; }
-#containers-table td:nth-child(2), #containers-table th:nth-child(2) { width: 18%; }
+#containers-table td:nth-child(1), #containers-table th:nth-child(1) { width: 17%; }
+#containers-table td:nth-child(2), #containers-table th:nth-child(2) { width: 21%; }
 #containers-table td:nth-child(3), #containers-table th:nth-child(3) { width: 10%; }
-#containers-table td:nth-child(4), #containers-table th:nth-child(4) { width: 13%; }
-#containers-table td:nth-child(5), #containers-table th:nth-child(5) { width: 14%; }
-#containers-table td:nth-child(6), #containers-table th:nth-child(6) { width: 30%; }
+#containers-table td:nth-child(4), #containers-table th:nth-child(4) { width: 16%; }
+#containers-table td:nth-child(5), #containers-table th:nth-child(5) { width: 16%; }
+#containers-table td:nth-child(6), #containers-table th:nth-child(6) { width: 340px; }
 
 /* ── Cell helpers ─────────────────────────── */
 .mono { font-family: 'Cascadia Code', 'Fira Code', Consolas, monospace; font-size: 13px; }
 .dim  { color: var(--dim); }
+.cell-name { font-weight: 600; color: #e6edf3; }
 
 .status-dot {
   display: inline-flex;
@@ -188,7 +205,29 @@ td .port-tag { white-space: nowrap; }
 .port-link { color: var(--accent); text-decoration: none; cursor: pointer; transition: background .15s; }
 .port-link:hover { background: rgba(88,166,255,.15); border-color: var(--accent); }
 
-.actions { display: flex; gap: 4px; flex-wrap: wrap; }
+.actions { display: flex; gap: 4px; flex-wrap: wrap; align-items: center; }
+
+/*
+ * Acciones de contenedor: rejilla de ranuras fijas para que cada botón caiga
+ * siempre en la misma columna, independientemente del estado del contenedor.
+ * Ranuras: 1 start/stop · 2 restart · 3 pause · (4 sep) · 5 logs · 6 stats
+ *          7 inspect · 8 procesos · 9 terminal · (10 sep) · 11 remove
+ */
+.actions-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 30px) 9px repeat(5, 30px) 9px 30px;
+  gap: 4px;
+  justify-content: start;
+}
+/* Todo en la misma fila: si no, el auto-placement empuja los separadores abajo */
+.actions-grid > * { grid-row: 1; }
+.actions-grid .act-sep {
+  width: 1px;
+  height: 18px;
+  background: var(--border);
+  justify-self: center;
+  align-self: center;
+}
 
 .mini-stats {
   font-size: 11.5px;
@@ -427,6 +466,6 @@ td .port-tag { white-space: nowrap; }
 }
 @media (max-width: 700px) {
   main { padding: 16px 12px; }
-  .actions { flex-direction: column; }
   td, th { padding: 8px 10px; }
+  .actions-grid { grid-template-columns: repeat(3, 30px) 6px repeat(5, 30px) 6px 30px; gap: 3px; }
 }

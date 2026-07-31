@@ -1,2 +1,6 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+
+# Los scripts se ejecutan en el servidor Linux: siempre LF, nunca CRLF
+# (con CRLF fallan con "bad interpreter: /usr/bin/env sh^M")
+*.sh text eol=lf

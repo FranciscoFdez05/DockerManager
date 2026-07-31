@@ -4,7 +4,6 @@ set -e
 
 APP_DIR="/opt/dockergestor"
 SERVICE="dockergestor"
-PORT=3000
 CURRENT_USER=$(whoami)
 
 echo "========================================"
@@ -34,9 +33,14 @@ python3 -c "import venv" 2>/dev/null || {
 # Copiar archivos
 echo "Instalando archivos en $APP_DIR..."
 sudo mkdir -p "$APP_DIR/static"
-sudo cp main.py requirements.txt "$APP_DIR/"
+sudo cp main.py config.py requirements.txt "$APP_DIR/"
+[ -f "$APP_DIR/config.ini" ] || sudo cp config.ini "$APP_DIR/"
 sudo cp static/index.html static/style.css static/app.js "$APP_DIR/static/"
 sudo chown -R "$CURRENT_USER:$CURRENT_USER" "$APP_DIR"
+
+# Puerto leido de config.ini (usado solo para mostrar la URL final)
+PORT=$(grep -E '^port\s*=' "$APP_DIR/config.ini" | head -1 | sed -E 's/^port\s*=\s*//')
+PORT=${PORT:-3000}
 
 # Crear entorno virtual e instalar dependencias
 echo "Instalando dependencias Python..."
@@ -64,7 +68,7 @@ Wants=docker.service
 Type=simple
 User=${CURRENT_USER}
 WorkingDirectory=${APP_DIR}
-ExecStart=${APP_DIR}/venv/bin/uvicorn main:app --host 0.0.0.0 --port ${PORT}
+ExecStart=${APP_DIR}/venv/bin/python main.py
 Restart=on-failure
 RestartSec=5s
 StandardOutput=journal

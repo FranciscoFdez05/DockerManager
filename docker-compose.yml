@@ -4,12 +4,21 @@ services:
     container_name: dockermanager
     restart: unless-stopped
     ports:
-      - "3000:3000"
+      # 0.0.0.0 = publicado en todas las interfaces -> accesible desde
+      # cualquier equipo de la LAN. ${PORT} lo exporta docker-up.sh a
+      # partir de [server] port en config.ini.
+      - "0.0.0.0:${PORT:-3000}:${PORT:-3000}"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - dockermanager-data:/data
+      - ./config.ini:/app/config.ini:ro
     environment:
       - DATA_DIR=/data
+      # Mismo puerto dentro del contenedor que el publicado fuera.
+      - PORT=${PORT:-3000}
+      # Generada por docker-up.sh en el .env. Mantiene viva la sesion
+      # entre reinicios del contenedor.
+      - SECRET_KEY=${SECRET_KEY:-}
 
 volumes:
   dockermanager-data:
