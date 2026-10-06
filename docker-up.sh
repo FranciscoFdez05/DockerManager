@@ -68,6 +68,11 @@ esac
 # Se exporta para docker-compose.yml: publica el puerto y se lo pasa a la app.
 export PORT
 
+# Versión de la app (version.py): etiqueta de la imagen en docker-compose.yml.
+DOCKERMANAGER_VERSION=$(sed -n 's/^__version__ = "\(.*\)"/\1/p' version.py | head -n 1)
+[ -n "$DOCKERMANAGER_VERSION" ] || DOCKERMANAGER_VERSION=latest
+export DOCKERMANAGER_VERSION
+
 # ── 3. Arranque ─────────────────────────────────────────────────────────────
 docker compose up -d --build "$@"
 
@@ -77,7 +82,7 @@ LAN_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
 [ -n "$LAN_IP" ] || LAN_IP="IP_DEL_SERVIDOR"
 
 echo
-echo "DockerManager levantado en el puerto $PORT (config.ini)."
+echo "DockerManager $DOCKERMANAGER_VERSION levantado en el puerto $PORT (config.ini)."
 echo "  Local:        http://localhost:$PORT"
 echo "  Desde la LAN: http://$LAN_IP:$PORT"
 echo

@@ -6,4 +6,4 @@ venv
 *.egg-info
 README.md
 install.sh
-update.sh
+docker-update.sh

@@ -1,6 +1,9 @@
 services:
   dockermanager:
     build: .
+    # Cada versión queda etiquetada (dockermanager:1.0.0): docker-update.sh
+    # puede volver atrás al instante si la nueva no arranca.
+    image: dockermanager:${DOCKERMANAGER_VERSION:-latest}
     container_name: dockermanager
     restart: unless-stopped
     ports:

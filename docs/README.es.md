@@ -13,7 +13,9 @@ Interfaz web ligera para gestionar Docker desde el navegador. Construida con Fas
 
 ### Contenedores
 - Lista todos los contenedores con nombre, imagen, estado, puertos y estadísticas en vivo de CPU/RAM
+- Contenedores agrupados por stack de Docker Compose, con grupos plegables e inicio/reinicio/parada de un stack completo
 - Iniciar, detener, reiniciar, pausar y reanudar contenedores
+- Estado del healthcheck y filtro por estado
 - Crear contenedores desde la UI: imagen, nombre, comando, política de reinicio, puertos, variables de entorno, volúmenes y red
 - Streaming de logs en tiempo real con desplazamiento automático, limpiar y descargar como `.log`
 - Terminal interactiva (xterm.js) con detección automática de `bash`/`sh` y redimensionado dinámico
@@ -24,6 +26,7 @@ Interfaz web ligera para gestionar Docker desde el navegador. Construida con Fas
 
 ### Imágenes
 - Lista imágenes con etiqueta, ID, tamaño y fecha de creación
+- Imágenes y volúmenes clasificados por propietario (stack o contenedor), con un grupo «Sin usar»
 - Descargar imágenes por etiqueta
 - Eliminar imágenes
 - Ver historial de capas
@@ -115,7 +118,7 @@ Todo se ajusta en `config.ini`. Las variables de entorno (`DATA_DIR`, `PORT`, `H
 ### Actualización
 
 ```bash
-bash update.sh
+./docker-update.sh
 ```
 
 O manualmente:
@@ -150,7 +153,7 @@ DockerManager/
 ├── docker-compose.yml
 ├── docker-up.sh         # Script de arranque (.env + puerto + compose up)
 ├── install.sh           # Instalador nativo (Ubuntu + systemd)
-├── update.sh
+├── docker-update.sh    # Actualiza, comprueba y vuelve atrás si falla
 ├── docs/
 │   └── README.es.md     # Documentación en español
 └── static/

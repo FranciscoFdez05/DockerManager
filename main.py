@@ -18,8 +18,9 @@ import bcrypt
 from collections import defaultdict
 from datetime import datetime, timedelta
 import config as cfg_ini
+from version import __version__
 
-app = FastAPI(title="DockerManager")
+app = FastAPI(title="DockerManager", version=__version__)
 
 # ── Configuración persistente ─────────────────────────────────────────────────
 DATA_DIR = cfg_ini.DATA_DIR
@@ -133,7 +134,7 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
 
 # ── Middleware: autenticación ─────────────────────────────────────────────────
 class AuthMiddleware(BaseHTTPMiddleware):
-    _PUBLIC = {"/api/auth/login", "/api/auth/status", "/api/auth/setup"}
+    _PUBLIC = {"/api/auth/login", "/api/auth/status", "/api/auth/setup", "/api/health"}
 
     async def dispatch(self, request: Request, call_next):
         path = request.url.path
@@ -149,6 +150,19 @@ class AuthMiddleware(BaseHTTPMiddleware):
 
 app.add_middleware(SecurityHeadersMiddleware)
 app.add_middleware(AuthMiddleware)
+
+
+# ── Health ────────────────────────────────────────────────────────────────────
+@app.get("/api/health")
+def health():
+    """Público. Comprueba que la app puede hablar con el daemon de Docker; lo usan
+    docker-update.sh y el HEALTHCHECK de la imagen para distinguir «el proceso está
+    arriba» de «la aplicación funciona»."""
+    try:
+        docker.from_env().ping()
+    except Exception:
+        return JSONResponse({"status": "error", "docker": False, "version": __version__}, status_code=503)
+    return {"status": "ok", "docker": True, "version": __version__}
 
 
 # ── Auth endpoints ────────────────────────────────────────────────────────────
@@ -265,25 +279,81 @@ def _ws_auth(websocket: WebSocket) -> bool:
     return websocket.cookies.get(cfg_ini.SESSION_COOKIE_NAME) == _get_token()
 
 
+# ── Uso de recursos por contenedor ────────────────────────────────────────────
+PROJECT_LABEL = "com.docker.compose.project"
+SERVICE_LABEL = "com.docker.compose.service"
+
+
+def _container_image_name(c) -> str:
+    """Nombre de imagen sin tocar c.image: falla (ImageNotFound) si la imagen ya se borró."""
+    a = c.attrs
+    name = (a.get("Config") or {}).get("Image") or ""
+    if not name or name.startswith("sha256:"):
+        name = (a.get("Image") or "")[7:19]
+    return name
+
+
+def _container_info(c) -> dict:
+    a = c.attrs
+    labels = (a.get("Config") or {}).get("Labels") or {}
+    ports = {}
+    for k, v in ((a.get("NetworkSettings") or {}).get("Ports") or {}).items():
+        if v:
+            ports[k] = sorted({p["HostPort"] for p in v})
+    mounts = a.get("Mounts") or []
+    return {
+        "id": c.short_id,
+        "name": c.name,
+        "image": _container_image_name(c),
+        "image_id": (a.get("Image") or "").replace("sha256:", "")[:12],
+        "status": (a.get("State") or {}).get("Status", "unknown"),
+        "health": ((a.get("State") or {}).get("Health") or {}).get("Status"),
+        "project": labels.get(PROJECT_LABEL),
+        "service": labels.get(SERVICE_LABEL),
+        "created": (a.get("Created") or "")[:19].replace("T", " "),
+        "ports": ports,
+        "volumes": [m["Name"] for m in mounts if m.get("Type") == "volume" and m.get("Name")],
+    }
+
+
+def _all_container_infos(client) -> list[dict]:
+    infos = []
+    for c in client.containers.list(all=True):
+        try:
+            infos.append(_container_info(c))
+        except Exception:
+            continue  # un contenedor corrupto no debe tumbar todo el listado
+    return infos
+
+
+def _user_ref(ci: dict) -> dict:
+    return {"name": ci["name"], "project": ci["project"], "status": ci["status"]}
+
+
 # ── Containers ────────────────────────────────────────────────────────────────
 @app.get("/api/containers")
 def list_containers():
+    return _all_container_infos(get_docker())
+
+
+@app.post("/api/projects/{project}/{op}")
+def project_action(project: str, op: str):
+    """Acción masiva sobre todos los contenedores de un stack de compose."""
+    if op not in ("start", "stop", "restart"):
+        raise HTTPException(400, "Operación inválida")
     client = get_docker()
-    result = []
-    for c in client.containers.list(all=True):
-        ports = {}
-        if c.ports:
-            for k, v in c.ports.items():
-                if v:
-                    ports[k] = [p["HostPort"] for p in v]
-        result.append({
-            "id": c.short_id,
-            "name": c.name,
-            "image": c.image.tags[0] if c.image.tags else c.image.short_id,
-            "status": c.status,
-            "ports": ports,
-        })
-    return result
+    members = client.containers.list(all=True, filters={"label": f"{PROJECT_LABEL}={project}"})
+    if not members:
+        raise HTTPException(404, "Stack no encontrado")
+    errors = []
+    for c in members:
+        try:
+            getattr(c, op)()
+        except Exception as e:
+            errors.append(f"{c.name}: {e}")
+    if errors:
+        raise HTTPException(500, "; ".join(errors))
+    return {"status": op, "containers": len(members)}
 
 
 @app.post("/api/containers/create")
@@ -540,21 +610,30 @@ def _parse_stats(s: dict) -> dict:
 @app.get("/api/images")
 def list_images():
     client = get_docker()
-    return [
-        {"id": img.short_id.replace("sha256:", ""), "tags": img.tags,
-         "size_mb": round(img.attrs["Size"] / (1024**2), 1), "created": img.attrs["Created"][:10]}
-        for img in client.images.list()
-    ]
+    users: dict[str, list] = defaultdict(list)
+    for ci in _all_container_infos(client):
+        users[ci["image_id"]].append(_user_ref(ci))
+    result = []
+    for img in client.images.list():
+        sid = img.id.replace("sha256:", "")[:12]
+        result.append({
+            "id": sid, "tags": img.tags,
+            "size_mb": round(img.attrs["Size"] / (1024**2), 1), "created": img.attrs["Created"][:10],
+            "used_by": users.get(sid, []),
+        })
+    return result
 
 
 @app.delete("/api/images/{image_id}")
-def remove_image(image_id: str):
+def remove_image(image_id: str, force: bool = False):
     client = get_docker()
     try:
-        client.images.remove(image_id, force=True)
+        client.images.remove(image_id, force=force)
         return {"status": "removed"}
     except docker.errors.ImageNotFound:
         raise HTTPException(404, "Imagen no encontrada")
+    except docker.errors.APIError as e:
+        raise HTTPException(409 if e.status_code == 409 else 500, e.explanation or str(e))
     except Exception as e:
         raise HTTPException(500, str(e))
 
@@ -590,10 +669,15 @@ def image_history(image_id: str):
 @app.get("/api/volumes")
 def list_volumes():
     client = get_docker()
+    users: dict[str, list] = defaultdict(list)
+    for ci in _all_container_infos(client):
+        for vol in ci["volumes"]:
+            users[vol].append(_user_ref(ci))
     return [
         {"name": v.name, "driver": v.attrs.get("Driver", ""),
          "mountpoint": v.attrs.get("Mountpoint", ""),
-         "created": (v.attrs.get("CreatedAt") or "")[:10], "labels": v.attrs.get("Labels") or {}}
+         "created": (v.attrs.get("CreatedAt") or "")[:10], "labels": v.attrs.get("Labels") or {},
+         "used_by": users.get(v.name, [])}
         for v in client.volumes.list()
     ]
 
@@ -602,10 +686,12 @@ def list_volumes():
 def remove_volume(volume_name: str):
     client = get_docker()
     try:
-        client.volumes.get(volume_name).remove(force=True)
+        client.volumes.get(volume_name).remove()
         return {"status": "removed"}
     except docker.errors.NotFound:
         raise HTTPException(404, "Volumen no encontrado")
+    except docker.errors.APIError as e:
+        raise HTTPException(409 if e.status_code == 409 else 500, e.explanation or str(e))
     except Exception as e:
         raise HTTPException(500, str(e))
 
@@ -651,6 +737,7 @@ def system_info():
         except Exception:
             pass
         return {
+            "app_version": __version__,
             "docker_version": version.get("Version", ""), "api_version": version.get("ApiVersion", ""),
             "os": info.get("OperatingSystem", ""), "kernel": info.get("KernelVersion", ""),
             "arch": info.get("Architecture", ""), "hostname": info.get("Name", ""),

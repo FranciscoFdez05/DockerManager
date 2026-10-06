@@ -52,6 +52,7 @@
         <h2>DockerManager</h2>
       </div>
       <p class="login-sub">Introduce tus credenciales para continuar</p>
+      <span class="app-version" data-app-version></span>
       <input id="login-user" type="text" class="form-input" placeholder="Usuario" autocomplete="username" />
       <input id="login-pass" type="password" class="form-input" placeholder="Contraseña" autocomplete="current-password" />
       <div id="login-error" class="login-error hidden"></div>
@@ -90,6 +91,7 @@
         <path d="M2 19c0 3 2 5 5 5h18c3 0 5-2 4-5" stroke="#58a6ff" stroke-width="1.5" stroke-linecap="round"/>
       </svg>
       <h1>DockerManager</h1>
+      <span class="app-version" data-app-version title="Versión de DockerManager"></span>
     </div>
     <div class="header-right">
       <div id="host-stats-bar" class="host-stats-bar"></div>
@@ -104,12 +106,20 @@
   </header>
 
   <main>
+    <!-- Resumen -->
+    <div id="summary" class="summary"></div>
+
     <!-- Contenedores -->
     <section class="section">
       <div class="section-header">
         <h2>Contenedores</h2>
         <span id="container-count" class="count-badge"></span>
-        <input id="filter-input" class="filter-input" type="text" placeholder="Filtrar..." oninput="filterContainers()" />
+        <select id="status-filter" class="filter-input filter-select" onchange="filterContainers()">
+          <option value="">Todos</option>
+          <option value="running">Corriendo</option>
+          <option value="stopped">Detenidos</option>
+        </select>
+        <input id="filter-input" class="filter-input filter-first" type="text" placeholder="Filtrar..." oninput="filterContainers()" />
       </div>
       <div class="table-wrapper">
         <table id="containers-table">
@@ -144,12 +154,13 @@
               <th>Nombre / Tag</th>
               <th>ID</th>
               <th>Tama&ntilde;o</th>
+              <th>Usada por</th>
               <th>Creada</th>
               <th class="col-actions">Acciones</th>
             </tr>
           </thead>
           <tbody id="images-body">
-            <tr><td colspan="5" class="empty">Cargando...</td></tr>
+            <tr><td colspan="6" class="empty">Cargando...</td></tr>
           </tbody>
         </table>
       </div>
@@ -168,12 +179,13 @@
               <th>Nombre</th>
               <th>Driver</th>
               <th>Punto de montaje</th>
+              <th>Usado por</th>
               <th>Creado</th>
               <th class="col-actions">Acciones</th>
             </tr>
           </thead>
           <tbody id="volumes-body">
-            <tr><td colspan="5" class="empty">Cargando...</td></tr>
+            <tr><td colspan="6" class="empty">Cargando...</td></tr>
           </tbody>
         </table>
       </div>

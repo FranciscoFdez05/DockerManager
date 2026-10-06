@@ -13,7 +13,9 @@ A lightweight web interface for managing Docker from the browser. Built with Fas
 
 ### Containers
 - List all containers with name, image, status, ports, and live CPU/RAM stats
+- Containers grouped by Docker Compose stack, with collapsible groups and one-click start/restart/stop for a whole stack
 - Start, stop, restart, pause, and resume containers
+- Healthcheck status and status filter
 - Create containers via UI: image, name, command, restart policy, ports, environment variables, volumes, and network
 - Real-time log streaming with autoscroll, clear, and download as `.log`
 - Interactive terminal (xterm.js) with automatic `bash`/`sh` detection and dynamic resize
@@ -24,11 +26,13 @@ A lightweight web interface for managing Docker from the browser. Built with Fas
 
 ### Images
 - List images with tag, ID, size, and creation date
+- Images and volumes classified by owner (stack or container), with a "Sin usar" (unused) group
 - Pull images by tag
 - Delete images
 - View layer history
 
 ### Volumes & Networks
+- Overview cards: running containers, stacks, images, volumes, networks
 - List, inspect, and delete volumes and networks
 - Connect and disconnect containers from networks via the inspect modal
 
@@ -115,7 +119,7 @@ Everything is set in `config.ini`. Environment variables (`DATA_DIR`, `PORT`, `H
 ### Updating
 
 ```bash
-bash update.sh
+./docker-update.sh
 ```
 
 Or manually:
@@ -150,7 +154,7 @@ DockerManager/
 ├── docker-compose.yml
 ├── docker-up.sh         # Startup script (.env + port + compose up)
 ├── install.sh           # Native installer (Ubuntu + systemd)
-├── update.sh
+├── docker-update.sh    # Update + health check + auto-rollback
 ├── docs/
 │   └── README.es.md     # Spanish documentation
 └── static/

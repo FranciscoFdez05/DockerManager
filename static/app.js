@@ -12,6 +12,8 @@ let currentProcId = null;
 let currentLogId = null;
 let currentLogName = null;
 let prevContainerStates = {};
+const data = { containers: [], images: [], volumes: [], networks: [] };
+const collapsed = loadCollapsed();
 const chartBuf = { labels: [], cpu: [], mem: [] };
 const MAX_CHART_PTS = 60;
 
@@ -35,6 +37,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     q(id).addEventListener('keydown', e => { if (e.key === 'Enter') doLogin(); })
   );
 
+  loadVersion();
   const ok = await checkAuth();
   if (!ok) return;
   boot();
@@ -54,6 +57,17 @@ function boot() {
 document.addEventListener('keydown', e => {
   if (e.key === 'Escape') closeAllModals();
 });
+
+// ── Versión ────────────────────────────────────────────────────────────────
+// /api/health es público, así que la versión se ve también en la pantalla de login
+async function loadVersion() {
+  try {
+    const res = await fetch('/api/health');
+    const d = await res.json();
+    if (!d.version) return;
+    document.querySelectorAll('[data-app-version]').forEach(el => { el.textContent = `v${d.version}`; });
+  } catch (_) {}
+}
 
 // ── Auth ───────────────────────────────────────────────────────────────────
 async function checkAuth() {
@@ -203,6 +217,22 @@ function fireNotif(title, body) {
 }
 
 // ── Data loading ───────────────────────────────────────────────────────────
+async function apiError(res) {
+  try { const b = await res.json(); return b.detail || `HTTP ${res.status}`; }
+  catch (_) { return `HTTP ${res.status}`; }
+}
+
+function loadCollapsed() {
+  try { return JSON.parse(localStorage.getItem('dm-collapsed') || '{}'); } catch (_) { return {}; }
+}
+
+function toggleGroup(key) {
+  collapsed[key] = !collapsed[key];
+  try { localStorage.setItem('dm-collapsed', JSON.stringify(collapsed)); } catch (_) {}
+  renderContainers(data.containers);
+  renderImages(data.images);
+  renderVolumes(data.volumes);
+}
 async function loadAll() {
   await Promise.all([loadContainers(), loadImages(), loadVolumes(), loadNetworks()]);
 }
@@ -210,10 +240,11 @@ async function loadAll() {
 async function loadContainers() {
   try {
     const res = await fetch('/api/containers');
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    if (!res.ok) throw new Error(await apiError(res));
     const list = await res.json();
     checkContainerAlerts(list);
     renderContainers(list);
+    renderSummary();
     setDockerStatus(true);
   } catch (err) {
     setDockerStatus(false);
@@ -225,22 +256,24 @@ async function loadContainers() {
 async function loadImages() {
   try {
     const res = await fetch('/api/images');
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    if (!res.ok) throw new Error(await apiError(res));
     renderImages(await res.json());
+    renderSummary();
   } catch (err) {
     q('images-body').innerHTML =
-      `<tr><td colspan="5" class="empty" style="color:var(--red)">${esc(err.message)}</td></tr>`;
+      `<tr><td colspan="6" class="empty" style="color:var(--red)">${esc(err.message)}</td></tr>`;
   }
 }
 
 async function loadVolumes() {
   try {
     const res = await fetch('/api/volumes');
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    if (!res.ok) throw new Error(await apiError(res));
     renderVolumes(await res.json());
+    renderSummary();
   } catch (err) {
     q('volumes-body').innerHTML =
-      `<tr><td colspan="5" class="empty" style="color:var(--red)">${esc(err.message)}</td></tr>`;
+      `<tr><td colspan="6" class="empty" style="color:var(--red)">${esc(err.message)}</td></tr>`;
   }
 }
 
@@ -249,6 +282,7 @@ async function loadNetworks() {
     const res = await fetch('/api/networks');
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     renderNetworks(await res.json());
+    renderSummary();
   } catch (err) {
     q('networks-body').innerHTML =
       `<tr><td colspan="6" class="empty" style="color:var(--red)">${esc(err.message)}</td></tr>`;
@@ -268,77 +302,191 @@ async function loadHostStats() {
 }
 
 // ── Rendering ──────────────────────────────────────────────────────────────
+function renderSummary() {
+  const c = data.containers;
+  const running = c.filter(x => x.status === 'running').length;
+  const unusedImgs = data.images.filter(i => !i.used_by.length).length;
+  const unusedVols = data.volumes.filter(v => !v.used_by.length).length;
+  const card = (label, value, sub, cls = '') =>
+    `<div class="sum-card ${cls}"><div class="sum-val">${value}</div><div class="sum-label">${label}</div><div class="sum-sub">${sub}</div></div>`;
+  q('summary').innerHTML =
+    card('Contenedores', `${running}<small>/${c.length}</small>`, 'corriendo / total', running === c.length ? '' : 'warn') +
+    card('Stacks', new Set(c.map(x => x.project).filter(Boolean)).size, 'proyectos compose') +
+    card('Imágenes', data.images.length, `${unusedImgs} sin usar`) +
+    card('Volúmenes', data.volumes.length, `${unusedVols} sin usar`) +
+    card('Redes', data.networks.length, 'definidas');
+}
+
+// Cabecera de grupo colapsable, común a las tres tablas
+function groupRow(key, title, meta, cols, extra = '') {
+  const closed = !!collapsed[key];
+  return `<tr class="group-row" data-key="${esc(key)}"><td colspan="${cols}">
+    <div class="group-head">
+      <button class="group-toggle" data-key="${esc(key)}" onclick="toggleGroup(this.dataset.key)" aria-expanded="${!closed}" title="${closed ? 'Expandir' : 'Contraer'}">${closed ? '&#9656;' : '&#9662;'}</button>
+      <span class="group-title">${esc(title)}</span>
+      <span class="group-meta">${meta}</span>
+      <span class="group-extra">${extra}</span>
+    </div></td></tr>`;
+}
+
+// Propietario de un recurso: su stack de compose, o el propio contenedor si va suelto
+function ownerKey(u) { return u.project ? `stack:${u.project}` : `ctr:${u.name}`; }
+function ownerTitle(u) { return u.project || u.name; }
+
+function userChips(users) {
+  if (!users.length) return '<span class="dim">—</span>';
+  return users.map(u =>
+    `<span class="port-tag chip-${u.status === 'running' ? 'up' : 'down'}" title="${esc(u.status)}">${esc(u.name)}</span>`
+  ).join('');
+}
+
+// Agrupa por el primer usuario del recurso; los huérfanos van a "Sin usar"
+function groupByOwner(items) {
+  const groups = new Map();
+  for (const it of items) {
+    const first = it.used_by[0];
+    const key = first ? ownerKey(first) : 'unused';
+    if (!groups.has(key)) {
+      groups.set(key, { key, title: first ? ownerTitle(first) : 'Sin usar',
+                        unused: !first, stack: !!(first && first.project), items: [] });
+    }
+    groups.get(key).items.push(it);
+  }
+  return [...groups.values()].sort((a, b) =>
+    (a.unused - b.unused) || (b.stack - a.stack) || a.title.localeCompare(b.title));
+}
+
+function ownerKind(g) { return g.stack ? 'stack · ' : g.unused ? '' : 'contenedor · '; }
+function plural(n, one, many) { return `${n} ${n === 1 ? one : many}`; }
+
+function containerRow(c) {
+  const isRunning = c.status === 'running';
+  const isPaused = c.status === 'paused';
+  const cls = STATUS_CLASS[c.status] || 's-other';
+  const label = STATUS_LABELS[c.status] || c.status;
+  const health = c.health
+    ? ` <span class="health health-${esc(c.health)}" title="Healthcheck: ${esc(c.health)}">${c.health === 'healthy' ? '&#10003;' : c.health === 'unhealthy' ? '&#10007;' : '&#8230;'}</span>` : '';
+
+  // Docker publica el mismo puerto una vez por familia IP (v4 y v6): deduplicamos
+  const portEntries = [...new Map(
+    Object.entries(c.ports || {}).flatMap(([k, v]) =>
+      v.map(p => [`${p}:${k}`, { host: p, container: k.split('/')[0] }])
+    )
+  ).values()];
+  const ports = portEntries.length
+    ? portEntries.map(p =>
+        `<a class="port-tag port-link" href="http://${location.hostname}:${esc(p.host)}" target="_blank" rel="noopener" title="Abrir puerto ${esc(p.host)}">${esc(p.host)}&#8594;${esc(p.container)}</a>`
+      ).join('')
+    : '<span class="dim">—</span>';
+
+  // Cada acción va en una ranura fija de la rejilla → columnas alineadas entre filas
+  const icon = (slot, cls, glyph, title, onclick) =>
+    `<button class="icon-btn ${cls}" style="grid-column:${slot}" title="${title}" aria-label="${title}" onclick="${onclick}">${glyph}</button>`;
+  const op = (slot, cls, glyph, name, title) =>
+    icon(slot, cls, glyph, title, `action('${c.id}','${name}')`);
+
+  const logBtn   = icon(5, 'btn-accent', '&#x1F4CB;', 'Logs',      `openLogs('${c.id}','${esc(c.name)}')`);
+  const statsBtn = icon(6, 'btn-accent', '&#x1F4CA;', 'Stats',     `openStats('${c.id}','${esc(c.name)}')`);
+  const inspBtn  = icon(7, '',           '&#x1F50D;', 'Inspect',   `openInspect('${c.id}','${esc(c.name)}')`);
+  const procsBtn = icon(8, '',           '&#x1F9F5;', 'Procesos',  `openProcs('${c.id}','${esc(c.name)}')`);
+  const termBtn  = icon(9, 'btn-yellow', '&#x1F5A5;', 'Terminal',  `openTerminal('${c.id}','${esc(c.name)}')`);
+  const rmBtn    = op(11, 'btn-red', '&#x1F5D1;', 'remove', 'Eliminar');
+  const sep      = col => `<span class="act-sep" style="grid-column:${col}"></span>`;
+
+  let acts;
+  if (isPaused) {
+    acts = [op(3, 'btn-yellow', '&#x25B6;', 'unpause', 'Reanudar'), logBtn, inspBtn, rmBtn];
+  } else if (isRunning) {
+    acts = [op(1, 'btn-red',    '&#x23F9;', 'stop',    'Detener'),
+            op(2, 'btn-yellow', '&#x21BA;', 'restart', 'Reiniciar'),
+            op(3, 'btn-yellow', '&#x23F8;', 'pause',   'Pausar'),
+            logBtn, statsBtn, inspBtn, procsBtn, termBtn];
+  } else {
+    acts = [op(1, 'btn-green', '&#x25B6;', 'start', 'Iniciar'), logBtn, inspBtn, rmBtn];
+  }
+  // El separador final solo si hay algo detrás de él
+  acts = acts.join('') + sep(4) + (acts.includes(rmBtn) ? sep(10) : '');
+
+  const statsCell = isRunning
+    ? `<span class="mini-stats" id="mstat-${c.id}">—</span>`
+    : `<span class="dim">—</span>`;
+  const service = c.service && c.service !== c.name
+    ? `<span class="svc-tag" title="Servicio compose">${esc(c.service)}</span>` : '';
+
+  return `<tr data-name="${esc((c.name + ' ' + (c.project || '') + ' ' + c.image).toLowerCase())}" data-state="${isRunning ? 'running' : 'stopped'}" data-group="${esc(containerGroup(c))}">
+    <td title="${esc(c.name)}"><span class="mono cell-name">${esc(c.name)}</span>${service}</td>
+    <td title="${esc(c.image)}"><span class="mono dim">${esc(c.image)}</span></td>
+    <td><span class="status-dot ${cls}">${label}</span>${health}</td>
+    <td>${ports}</td>
+    <td>${statsCell}</td>
+    <td class="col-actions"><div class="actions actions-grid">${acts}</div></td>
+  </tr>`;
+}
+
+function containerGroup(c) { return c.project ? `stack:${c.project}` : 'standalone'; }
+
 function renderContainers(list) {
+  data.containers = list;
   q('container-count').textContent = `${list.length} total`;
   if (!list.length) {
     q('containers-body').innerHTML = '<tr><td colspan="6" class="empty">Sin contenedores</td></tr>';
     return;
   }
 
-  q('containers-body').innerHTML = list.map(c => {
-    const isRunning = c.status === 'running';
-    const isPaused = c.status === 'paused';
-    const cls = STATUS_CLASS[c.status] || 's-other';
-    const label = STATUS_LABELS[c.status] || c.status;
+  const stacks = new Map();
+  const standalone = [];
+  [...list].sort((a, b) => a.name.localeCompare(b.name)).forEach(c => {
+    if (!c.project) { standalone.push(c); return; }
+    if (!stacks.has(c.project)) stacks.set(c.project, []);
+    stacks.get(c.project).push(c);
+  });
 
-    // Docker publica el mismo puerto una vez por familia IP (v4 y v6): deduplicamos
-    const portEntries = [...new Map(
-      Object.entries(c.ports || {}).flatMap(([k, v]) =>
-        v.map(p => [`${p}:${k}`, { host: p, container: k.split('/')[0] }])
-      )
-    ).values()];
-    const ports = portEntries.length
-      ? portEntries.map(p =>
-          `<a class="port-tag port-link" href="http://${location.hostname}:${esc(p.host)}" target="_blank" title="Abrir puerto ${esc(p.host)}">${esc(p.host)}&#8594;${esc(p.container)}</a>`
-        ).join('')
-      : '<span class="dim">—</span>';
+  const meta = items => {
+    const up = items.filter(c => c.status === 'running').length;
+    const cls = up === items.length ? 's-running' : up ? 's-paused' : 's-exited';
+    return `<span class="status-dot ${cls}">${up}/${items.length} corriendo</span>`;
+  };
 
-    // Cada acción va en una ranura fija de la rejilla → columnas alineadas entre filas
-    const icon = (slot, cls, glyph, title, onclick) =>
-      `<button class="icon-btn ${cls}" style="grid-column:${slot}" title="${title}" aria-label="${title}" onclick="${onclick}">${glyph}</button>`;
-    const op = (slot, cls, glyph, name, title) =>
-      icon(slot, cls, glyph, title, `action('${c.id}','${name}')`);
-
-    const logBtn   = icon(5, 'btn-accent', '&#x1F4CB;', 'Logs',      `openLogs('${c.id}','${esc(c.name)}')`);
-    const statsBtn = icon(6, 'btn-accent', '&#x1F4CA;', 'Stats',     `openStats('${c.id}','${esc(c.name)}')`);
-    const inspBtn  = icon(7, '',           '&#x1F50D;', 'Inspect',   `openInspect('${c.id}','${esc(c.name)}')`);
-    const procsBtn = icon(8, '',           '&#x1F9F5;', 'Procesos',  `openProcs('${c.id}','${esc(c.name)}')`);
-    const termBtn  = icon(9, 'btn-yellow', '&#x1F5A5;', 'Terminal',  `openTerminal('${c.id}','${esc(c.name)}')`);
-    const rmBtn    = op(11, 'btn-red', '&#x1F5D1;', 'remove', 'Eliminar');
-    const sep      = col => `<span class="act-sep" style="grid-column:${col}"></span>`;
-
-    let acts;
-    if (isPaused) {
-      acts = [op(3, 'btn-yellow', '&#x25B6;', 'unpause', 'Reanudar'),
-              logBtn, inspBtn, rmBtn];
-    } else if (isRunning) {
-      acts = [op(1, 'btn-red',    '&#x23F9;', 'stop',    'Detener'),
-              op(2, 'btn-yellow', '&#x21BA;', 'restart', 'Reiniciar'),
-              op(3, 'btn-yellow', '&#x23F8;', 'pause',   'Pausar'),
-              logBtn, statsBtn, inspBtn, procsBtn, termBtn];
+  let html = '';
+  [...stacks.keys()].sort().forEach(name => {
+    const items = stacks.get(name);
+    const key = `stack:${name}`;
+    const n = esc(name);
+    const bulk =
+      `<button class="btn-xs btn-green" onclick="projectAction(this.dataset.p,'start')" data-p="${n}" title="Iniciar todo el stack">&#x25B6; Iniciar</button>` +
+      `<button class="btn-xs btn-yellow" onclick="projectAction(this.dataset.p,'restart')" data-p="${n}" title="Reiniciar todo el stack">&#x21BA; Reiniciar</button>` +
+      `<button class="btn-xs btn-red" onclick="projectAction(this.dataset.p,'stop')" data-p="${n}" title="Detener todo el stack">&#x23F9; Detener</button>`;
+    html += groupRow(key, name, `stack · ${meta(items)}`, 6, bulk);
+    if (!collapsed[key]) html += items.map(containerRow).join('');
+  });
+  if (standalone.length) {
+    // Sin stacks la tabla queda plana; con ellos, los sueltos necesitan su cabecera
+    if (stacks.size) {
+      html += groupRow('standalone', 'Contenedores independientes', meta(standalone), 6);
+      if (!collapsed.standalone) html += standalone.map(containerRow).join('');
     } else {
-      acts = [op(1, 'btn-green', '&#x25B6;', 'start', 'Iniciar'),
-              logBtn, inspBtn, rmBtn];
+      html += standalone.map(containerRow).join('');
     }
-    // El separador final solo si hay algo detrás de él
-    acts = acts.join('') + sep(4) + (acts.includes(rmBtn) ? sep(10) : '');
+  }
+  q('containers-body').innerHTML = html;
 
-    const statsCell = isRunning
-      ? `<span class="mini-stats" id="mstat-${c.id}">—</span>`
-      : `<span class="dim">—</span>`;
-
-    return `<tr data-name="${esc(c.name.toLowerCase())}">
-      <td title="${esc(c.name)}"><span class="mono cell-name">${esc(c.name)}</span></td>
-      <td title="${esc(c.image)}"><span class="mono dim">${esc(c.image)}</span></td>
-      <td><span class="status-dot ${cls}">${label}</span></td>
-      <td>${ports}</td>
-      <td>${statsCell}</td>
-      <td class="col-actions"><div class="actions actions-grid">${acts}</div></td>
-    </tr>`;
-  }).join('');
-
-  list.filter(c => c.status === 'running').forEach(c => loadMiniStats(c.id));
+  list.filter(c => c.status === 'running' && !collapsed[containerGroup(c)])
+      .forEach(c => loadMiniStats(c.id));
   filterContainers();
+}
+
+async function projectAction(project, op) {
+  const verb = { start: 'iniciar', stop: 'detener', restart: 'reiniciar' }[op];
+  if (op !== 'start' && !confirm(`¿Seguro que quieres ${verb} todos los contenedores del stack "${project}"?`)) return;
+  toast(`Stack ${project}: ${verb}…`, 'info');
+  try {
+    const res = await fetch(`/api/projects/${encodeURIComponent(project)}/${op}`, { method: 'POST' });
+    if (!res.ok) throw new Error(await apiError(res));
+    toast(`Stack ${project}: completado`, 'success');
+    setTimeout(loadContainers, 800);
+  } catch (err) {
+    toast(`Error: ${err.message}`, 'error');
+  }
 }
 
 async function loadMiniStats(id) {
@@ -352,19 +500,30 @@ async function loadMiniStats(id) {
 }
 
 function filterContainers() {
-  const q_val = (q('filter-input').value || '').toLowerCase();
+  const text = (q('filter-input').value || '').toLowerCase();
+  const state = q('status-filter').value;
+  const filtering = !!(text || state);
+  const visible = new Set();
   document.querySelectorAll('#containers-body tr[data-name]').forEach(row => {
-    row.style.display = row.dataset.name.includes(q_val) ? '' : 'none';
+    const show = row.dataset.name.includes(text) && (!state || row.dataset.state === state);
+    row.style.display = show ? '' : 'none';
+    if (show) visible.add(row.dataset.group);
+  });
+  // Filtrando, se ocultan las cabeceras de grupos sin coincidencias
+  document.querySelectorAll('#containers-body tr.group-row').forEach(row => {
+    row.style.display = !filtering || visible.has(row.dataset.key) ? '' : 'none';
   });
 }
 
 function renderImages(list) {
-  q('image-count').textContent = `${list.length} total`;
+  data.images = list;
+  const unused = list.filter(i => !i.used_by.length).length;
+  q('image-count').textContent = `${list.length} total` + (unused ? ` · ${unused} sin usar` : '');
   if (!list.length) {
-    q('images-body').innerHTML = '<tr><td colspan="5" class="empty">Sin imágenes</td></tr>';
+    q('images-body').innerHTML = '<tr><td colspan="6" class="empty">Sin imágenes</td></tr>';
     return;
   }
-  q('images-body').innerHTML = list.map(img => {
+  const row = img => {
     const tags = img.tags.length
       ? img.tags.map(t => `<span class="port-tag">${esc(t)}</span>`).join(' ')
       : '<span class="dim">sin tag</span>';
@@ -372,33 +531,49 @@ function renderImages(list) {
       <td>${tags}</td>
       <td><span class="mono dim">${esc(img.id)}</span></td>
       <td>${img.size_mb} MB</td>
+      <td>${userChips(img.used_by)}</td>
       <td>${img.created}</td>
       <td class="col-actions"><div class="actions">
         <button class="icon-btn" title="Historial" aria-label="Historial" onclick="openHistory('${esc(img.id)}','${esc(img.tags[0] || img.id)}')">&#x1F4DC;</button>
         <button class="icon-btn btn-red" title="Eliminar" aria-label="Eliminar" onclick="removeImage('${esc(img.id)}')">&#x1F5D1;</button>
       </div></td>
     </tr>`;
+  };
+  q('images-body').innerHTML = groupByOwner(list).map(g => {
+    const key = `img:${g.key}`;
+    const mb = g.items.reduce((t, i) => t + i.size_mb, 0).toFixed(1);
+    return groupRow(key, g.title, `${ownerKind(g)}${plural(g.items.length, 'imagen', 'imágenes')} · ${mb} MB`, 6) +
+      (collapsed[key] ? '' : g.items.map(row).join(''));
   }).join('');
 }
 
 function renderVolumes(list) {
-  q('volume-count').textContent = `${list.length} total`;
+  data.volumes = list;
+  const unused = list.filter(v => !v.used_by.length).length;
+  q('volume-count').textContent = `${list.length} total` + (unused ? ` · ${unused} sin usar` : '');
   if (!list.length) {
-    q('volumes-body').innerHTML = '<tr><td colspan="5" class="empty">Sin volúmenes</td></tr>';
+    q('volumes-body').innerHTML = '<tr><td colspan="6" class="empty">Sin volúmenes</td></tr>';
     return;
   }
-  q('volumes-body').innerHTML = list.map(v => `<tr>
-    <td><span class="mono">${esc(v.name)}</span></td>
+  const row = v => `<tr>
+    <td title="${esc(v.name)}"><span class="mono">${esc(v.name)}</span></td>
     <td><span class="dim">${esc(v.driver)}</span></td>
     <td title="${esc(v.mountpoint)}"><span class="mono dim" style="font-size:11px">${esc(v.mountpoint)}</span></td>
+    <td>${userChips(v.used_by)}</td>
     <td>${v.created || '—'}</td>
     <td class="col-actions"><div class="actions">
       <button class="icon-btn btn-red" title="Eliminar" aria-label="Eliminar" onclick="removeVolume('${esc(v.name)}')">&#x1F5D1;</button>
     </div></td>
-  </tr>`).join('');
+  </tr>`;
+  q('volumes-body').innerHTML = groupByOwner(list).map(g => {
+    const key = `vol:${g.key}`;
+    return groupRow(key, g.title, `${ownerKind(g)}${plural(g.items.length, 'volumen', 'volúmenes')}`, 6) +
+      (collapsed[key] ? '' : g.items.map(row).join(''));
+  }).join('');
 }
 
 function renderNetworks(list) {
+  data.networks = list;
   q('network-count').textContent = `${list.length} total`;
   if (!list.length) {
     q('networks-body').innerHTML = '<tr><td colspan="6" class="empty">Sin redes</td></tr>';
@@ -435,7 +610,7 @@ async function action(id, op) {
 }
 
 async function removeImage(id) {
-  if (!confirm('¿Eliminar esta imagen?')) return;
+  if (!confirm('¿Eliminar esta imagen? Si la usa algún contenedor, Docker la rechazará.')) return;
   try {
     const res = await fetch(`/api/images/${id}`, { method: 'DELETE' });
     const body = await res.json();
@@ -448,7 +623,7 @@ async function removeImage(id) {
 }
 
 async function removeVolume(name) {
-  if (!confirm(`¿Eliminar volumen "${name}"?`)) return;
+  if (!confirm(`¿Eliminar volumen "${name}"? Los datos se perderán de forma permanente.`)) return;
   try {
     const res = await fetch(`/api/volumes/${encodeURIComponent(name)}`, { method: 'DELETE' });
     const body = await res.json();
@@ -919,7 +1094,7 @@ async function openSystemInfo() {
     q('sysinfo-body').innerHTML = `
       <div class="inspect-section" style="padding:20px">
         ${kv('Hostname', d.hostname)} ${kv('IP del host', d.host_ip)}
-        ${kv('Docker versión', d.docker_version)} ${kv('API versión', d.api_version)}
+        ${kv('DockerManager', 'v' + d.app_version)} ${kv('Docker versión', d.docker_version)} ${kv('API versión', d.api_version)}
         ${kv('Sistema operativo', d.os)} ${kv('Kernel', d.kernel)}
         ${kv('Arquitectura', d.arch)} ${kv('CPUs', d.cpus)}
         ${kv('Memoria total', d.memory_gb + ' GB')}
