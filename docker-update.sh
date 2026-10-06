@@ -84,6 +84,12 @@ if [ ! -f .env ]; then
     exit 1
 fi
 
+# El chmod +x que se hace en el servidor cambia el modo del fichero (100644 →
+# 100755) y git lo cuenta como modificación: aparecía como «cambio local» y
+# bloqueaba cada actualización. Se le dice a git que en este clon ignore los
+# permisos; solo afecta a esta copia del repositorio.
+git config core.fileMode false 2>/dev/null || true
+
 # Solo importan los ficheros versionados modificados: son los que chocarían con
 # el pull. Los no versionados (.env, __pycache__...) no molestan.
 if [ "$SIN_PULL" -eq 0 ]; then
