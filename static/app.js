@@ -244,6 +244,9 @@ async function loadContainers() {
     const list = await res.json();
     checkContainerAlerts(list);
     renderContainers(list);
+    // Los grupos de imágenes y volúmenes dependen de los contenedores
+    if (data.images.length) renderImages(data.images);
+    if (data.volumes.length) renderVolumes(data.volumes);
     renderSummary();
     setDockerStatus(true);
   } catch (err) {
@@ -329,9 +332,40 @@ function groupRow(key, title, meta, cols, extra = '') {
     </div></td></tr>`;
 }
 
-// Propietario de un recurso: su stack de compose, o el propio contenedor si va suelto
-function ownerKey(u) { return u.project ? `stack:${u.project}` : `ctr:${u.name}`; }
-function ownerTitle(u) { return u.project || u.name; }
+// Agrupación: el stack de compose si existe; si no, el primer segmento del nombre
+// ("PorfolioManager-caddy" → "porfoliomanager"). Así las distintas versiones y
+// servicios de una misma app quedan juntos aunque no se lanzaran con compose.
+const groupTitles = new Map();
+function nameToken(name) { return String(name).split(/[-_.]/)[0]; }
+function groupKeyOf(x) { return `grp:${(x.project || nameToken(x.name)).toLowerCase()}`; }
+function rebuildGroupTitles() {
+  groupTitles.clear();
+  [...data.containers].sort((a, b) => a.name.localeCompare(b.name)).forEach(c => {
+    const k = groupKeyOf(c);
+    if (!groupTitles.has(k)) groupTitles.set(k, c.project || nameToken(c.name));
+  });
+}
+function groupTitleOf(key, fallback) { return groupTitles.get(key) || fallback || key.slice(4); }
+
+// Grupo de un recurso sin contenedores: por nombre contra los grupos conocidos
+// (el más largo gana: "porfoliomanager_caddy_data" → porfoliomanager)
+function matchGroupByName(name) {
+  const n = String(name).toLowerCase();
+  let best = null;
+  for (const k of groupTitles.keys()) {
+    const stem = k.slice(4);
+    if (n.startsWith(stem) && (!best || stem.length > best.length)) best = stem;
+  }
+  return best ? `grp:${best}` : null;
+}
+function imageRepo(img) {
+  const t = img.tags[0];
+  return t ? t.replace(/:[^:/]*$/, '').split('/').pop() : '';
+}
+function volumeOwner(v) {
+  const label = v.labels && v.labels['com.docker.compose.project'];
+  return label ? `grp:${label.toLowerCase()}` : matchGroupByName(v.name);
+}
 
 function userChips(users) {
   if (!users.length) return '<span class="dim">—</span>';
@@ -340,23 +374,24 @@ function userChips(users) {
   ).join('');
 }
 
-// Agrupa por el primer usuario del recurso; los huérfanos van a "Sin usar"
-function groupByOwner(items) {
+// Agrupa por el primer usuario del recurso; si nadie lo usa, por nombre; si no, "Sin usar"
+function groupByOwner(items, fallbackKey) {
   const groups = new Map();
   for (const it of items) {
     const first = it.used_by[0];
-    const key = first ? ownerKey(first) : 'unused';
+    let key = first ? groupKeyOf(first) : fallbackKey(it);
+    const unused = !key;
+    if (!key) key = 'unused';
     if (!groups.has(key)) {
-      groups.set(key, { key, title: first ? ownerTitle(first) : 'Sin usar',
-                        unused: !first, stack: !!(first && first.project), items: [] });
+      groups.set(key, { key, unused,
+        title: unused ? 'Sin usar' : groupTitleOf(key, first && (first.project || nameToken(first.name))),
+        items: [] });
     }
     groups.get(key).items.push(it);
   }
-  return [...groups.values()].sort((a, b) =>
-    (a.unused - b.unused) || (b.stack - a.stack) || a.title.localeCompare(b.title));
+  return [...groups.values()].sort((a, b) => (a.unused - b.unused) || a.title.localeCompare(b.title));
 }
 
-function ownerKind(g) { return g.stack ? 'stack · ' : g.unused ? '' : 'contenedor · '; }
 function plural(n, one, many) { return `${n} ${n === 1 ? one : many}`; }
 
 function containerRow(c) {
@@ -423,7 +458,7 @@ function containerRow(c) {
   </tr>`;
 }
 
-function containerGroup(c) { return c.project ? `stack:${c.project}` : 'standalone'; }
+function containerGroup(c) { return groupKeyOf(c); }
 
 function renderContainers(list) {
   data.containers = list;
@@ -433,12 +468,12 @@ function renderContainers(list) {
     return;
   }
 
-  const stacks = new Map();
-  const standalone = [];
+  rebuildGroupTitles();
+  const groups = new Map();
   [...list].sort((a, b) => a.name.localeCompare(b.name)).forEach(c => {
-    if (!c.project) { standalone.push(c); return; }
-    if (!stacks.has(c.project)) stacks.set(c.project, []);
-    stacks.get(c.project).push(c);
+    const k = groupKeyOf(c);
+    if (!groups.has(k)) groups.set(k, []);
+    groups.get(k).push(c);
   });
 
   const meta = items => {
@@ -448,26 +483,16 @@ function renderContainers(list) {
   };
 
   let html = '';
-  [...stacks.keys()].sort().forEach(name => {
-    const items = stacks.get(name);
-    const key = `stack:${name}`;
-    const n = esc(name);
-    const bulk =
-      `<button class="btn-xs btn-green" onclick="projectAction(this.dataset.p,'start')" data-p="${n}" title="Iniciar todo el stack">&#x25B6; Iniciar</button>` +
-      `<button class="btn-xs btn-yellow" onclick="projectAction(this.dataset.p,'restart')" data-p="${n}" title="Reiniciar todo el stack">&#x21BA; Reiniciar</button>` +
-      `<button class="btn-xs btn-red" onclick="projectAction(this.dataset.p,'stop')" data-p="${n}" title="Detener todo el stack">&#x23F9; Detener</button>`;
-    html += groupRow(key, name, `stack · ${meta(items)}`, 6, bulk);
+  [...groups.keys()].sort((a, b) => groupTitleOf(a).localeCompare(groupTitleOf(b))).forEach(key => {
+    const items = groups.get(key);
+    const k = esc(key);
+    const bulk = items.length < 2 ? '' :
+      `<button class="btn-xs btn-green" onclick="groupAction(this.dataset.k,'start')" data-k="${k}" title="Iniciar todos">&#x25B6; Iniciar</button>` +
+      `<button class="btn-xs btn-yellow" onclick="groupAction(this.dataset.k,'restart')" data-k="${k}" title="Reiniciar todos">&#x21BA; Reiniciar</button>` +
+      `<button class="btn-xs btn-red" onclick="groupAction(this.dataset.k,'stop')" data-k="${k}" title="Detener todos">&#x23F9; Detener</button>`;
+    html += groupRow(key, groupTitleOf(key), `${plural(items.length, 'contenedor', 'contenedores')} · ${meta(items)}`, 6, bulk);
     if (!collapsed[key]) html += items.map(containerRow).join('');
   });
-  if (standalone.length) {
-    // Sin stacks la tabla queda plana; con ellos, los sueltos necesitan su cabecera
-    if (stacks.size) {
-      html += groupRow('standalone', 'Contenedores independientes', meta(standalone), 6);
-      if (!collapsed.standalone) html += standalone.map(containerRow).join('');
-    } else {
-      html += standalone.map(containerRow).join('');
-    }
-  }
   q('containers-body').innerHTML = html;
 
   list.filter(c => c.status === 'running' && !collapsed[containerGroup(c)])
@@ -475,18 +500,22 @@ function renderContainers(list) {
   filterContainers();
 }
 
-async function projectAction(project, op) {
+async function groupAction(key, op) {
   const verb = { start: 'iniciar', stop: 'detener', restart: 'reiniciar' }[op];
-  if (op !== 'start' && !confirm(`¿Seguro que quieres ${verb} todos los contenedores del stack "${project}"?`)) return;
-  toast(`Stack ${project}: ${verb}…`, 'info');
-  try {
-    const res = await fetch(`/api/projects/${encodeURIComponent(project)}/${op}`, { method: 'POST' });
-    if (!res.ok) throw new Error(await apiError(res));
-    toast(`Stack ${project}: completado`, 'success');
-    setTimeout(loadContainers, 800);
-  } catch (err) {
-    toast(`Error: ${err.message}`, 'error');
-  }
+  const title = groupTitleOf(key);
+  const targets = data.containers.filter(c => groupKeyOf(c) === key &&
+    (op === 'start' ? c.status !== 'running' : c.status === 'running'));
+  if (!targets.length) { toast(`${title}: nada que ${verb}`, 'info'); return; }
+  if (op !== 'start' && !confirm(`¿${verb[0].toUpperCase() + verb.slice(1)} ${plural(targets.length, 'contenedor', 'contenedores')} de "${title}"?`)) return;
+  toast(`${title}: ${verb}…`, 'info');
+  const results = await Promise.allSettled(targets.map(async c => {
+    const res = await fetch(`/api/containers/${c.id}/${op}`, { method: 'POST' });
+    if (!res.ok) throw new Error(`${c.name}: ${await apiError(res)}`);
+  }));
+  const failed = results.filter(r => r.status === 'rejected');
+  if (failed.length) toast(`Error: ${failed.map(f => f.reason.message).join('; ')}`, 'error');
+  else toast(`${title}: completado`, 'success');
+  setTimeout(loadContainers, 800);
 }
 
 async function loadMiniStats(id) {
@@ -539,10 +568,10 @@ function renderImages(list) {
       </div></td>
     </tr>`;
   };
-  q('images-body').innerHTML = groupByOwner(list).map(g => {
+  q('images-body').innerHTML = groupByOwner(list, img => matchGroupByName(imageRepo(img))).map(g => {
     const key = `img:${g.key}`;
     const mb = g.items.reduce((t, i) => t + i.size_mb, 0).toFixed(1);
-    return groupRow(key, g.title, `${ownerKind(g)}${plural(g.items.length, 'imagen', 'imágenes')} · ${mb} MB`, 6) +
+    return groupRow(key, g.title, `${plural(g.items.length, 'imagen', 'imágenes')} · ${mb} MB`, 6) +
       (collapsed[key] ? '' : g.items.map(row).join(''));
   }).join('');
 }
@@ -565,9 +594,9 @@ function renderVolumes(list) {
       <button class="icon-btn btn-red" title="Eliminar" aria-label="Eliminar" onclick="removeVolume('${esc(v.name)}')">&#x1F5D1;</button>
     </div></td>
   </tr>`;
-  q('volumes-body').innerHTML = groupByOwner(list).map(g => {
+  q('volumes-body').innerHTML = groupByOwner(list, volumeOwner).map(g => {
     const key = `vol:${g.key}`;
-    return groupRow(key, g.title, `${ownerKind(g)}${plural(g.items.length, 'volumen', 'volúmenes')}`, 6) +
+    return groupRow(key, g.title, `${plural(g.items.length, 'volumen', 'volúmenes')}`, 6) +
       (collapsed[key] ? '' : g.items.map(row).join(''));
   }).join('');
 }

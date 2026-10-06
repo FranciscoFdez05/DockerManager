@@ -13,7 +13,7 @@ A lightweight web interface for managing Docker from the browser. Built with Fas
 
 ### Containers
 - List all containers with name, image, status, ports, and live CPU/RAM stats
-- Containers grouped by Docker Compose stack, with collapsible groups and one-click start/restart/stop for a whole stack
+- Containers grouped by Docker Compose stack, or by name prefix when there is none (`App`, `App-db`, `App-caddy` share a group), with collapsible groups and one-click start/restart/stop for a whole group
 - Start, stop, restart, pause, and resume containers
 - Healthcheck status and status filter
 - Create containers via UI: image, name, command, restart policy, ports, environment variables, volumes, and network

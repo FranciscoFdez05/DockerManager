@@ -116,6 +116,10 @@ def _client_ip(request: Request) -> str:
 class SecurityHeadersMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         response = await call_next(request)
+        if not request.url.path.startswith(("/api", "/ws")):
+            # Revalidar siempre los estáticos: sin esto el navegador sigue sirviendo
+            # un app.js antiguo tras actualizar y la interfaz nueva no aparece.
+            response.headers["Cache-Control"] = "no-cache"
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["X-Frame-Options"] = "DENY"
         response.headers["X-XSS-Protection"] = "1; mode=block"

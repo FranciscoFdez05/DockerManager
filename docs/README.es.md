@@ -13,7 +13,7 @@ Interfaz web ligera para gestionar Docker desde el navegador. Construida con Fas
 
 ### Contenedores
 - Lista todos los contenedores con nombre, imagen, estado, puertos y estadísticas en vivo de CPU/RAM
-- Contenedores agrupados por stack de Docker Compose, con grupos plegables e inicio/reinicio/parada de un stack completo
+- Contenedores agrupados por stack de Docker Compose o, si no hay, por el prefijo del nombre (`App`, `App-db`, `App-caddy` comparten grupo), con grupos plegables e inicio/reinicio/parada de un grupo completo
 - Iniciar, detener, reiniciar, pausar y reanudar contenedores
 - Estado del healthcheck y filtro por estado
 - Crear contenedores desde la UI: imagen, nombre, comando, política de reinicio, puertos, variables de entorno, volúmenes y red
