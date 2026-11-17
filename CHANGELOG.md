@@ -13,8 +13,10 @@ El formato sigue [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/).
 - Scrollbars finas y oscuras en toda la app. Los modales hacen scroll en su cuerpo en lugar de desbordar la pantalla, y los títulos largos se recortan con puntos suspensivos.
 - Hoja de estilos: colores derivados y fuentes en variables, media queries agrupadas al final de mayor a menor ancho, estilos en línea del HTML sustituidos por clases y logo SVG definido una sola vez.
 - Anillo de foco visible al navegar con teclado en botones y campos, y sin animaciones si el sistema pide reducir el movimiento.
+- Portada del README con logo, título centrado e insignias de versión, Python, FastAPI, Docker y licencia.
 
 ### Corregido
+- **Comprobar versiones** seguía mostrando la versión anterior hasta 5 minutos después de publicar una nueva: GitHub cachea los ficheros de cada rama en su CDN. Ahora `version.py` y `CHANGELOG.md` se leen del último commit de la rama, que se consulta a la API de GitHub; si la API falla, se leen de la rama como antes.
 - La clase `hidden` solo ocultaba en algunos contextos: el modal **Nuevo contenedor** mostraba siempre una barra roja vacía y los formularios de login, configuración inicial y cambio de contraseña dejaban un hueco de más.
 - Sin `DM_UID` en el `.env` (modo root de compatibilidad), `dockermanager-permisos` pasaba el buzón de actualizaciones a root y el vigilante del host se quedaba sin permisos. Ahora no toca nada.
 

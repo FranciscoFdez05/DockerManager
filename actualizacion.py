@@ -21,6 +21,7 @@ Ficheros del directorio compartido:
 """
 
 import json
+import logging
 import os
 import re
 import threading
@@ -53,6 +54,7 @@ MAX_BYTES_CHANGELOG = 512 * 1024
 # Con muchas versiones de salto, la ventana no puede convertirse en un libro.
 MAX_NOVEDADES = 10
 
+_PATRON_SHA = re.compile(r"^[0-9a-f]{40}$")
 _PATRON_VERSION = re.compile(r'^__version__\s*=\s*"(\d+(?:\.\d+)*)"', re.M)
 _PATRON_REPOSITORIO = re.compile(r"^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$")
 _PATRON_RAMA = re.compile(r"^[A-Za-z0-9._/-]+$")
@@ -64,6 +66,8 @@ _PATRON_ELEMENTO = re.compile(r"^[-*]\s+(.*)$")
 
 _cerrojo = threading.Lock()
 _cache: dict = {}
+
+logger = logging.getLogger(__name__)
 
 
 class VigilanteAusente(Exception):
@@ -90,18 +94,69 @@ def hay_nueva(instalada, publicada):
 
 
 # ── Versión publicada ─────────────────────────────────────────────────────────
-def _url(fichero: str = "version.py"):
+def _repositorio_y_rama() -> tuple | None:
+    """(repositorio, rama) de config.ini ya validados, o None si no son seguros para una URL."""
     repositorio = cfg_ini.UPDATE_REPO.strip().strip("/")
     rama = cfg_ini.UPDATE_BRANCH.strip().strip("/")
     if not _PATRON_REPOSITORIO.match(repositorio) or not _PATRON_RAMA.match(rama):
         return None
     if ".." in repositorio or ".." in rama:
         return None
-    return f"https://raw.githubusercontent.com/{repositorio}/{rama}/{fichero}"
+    return repositorio, rama
+
+
+def _url(fichero: str = "version.py", ref: str | None = None):
+    """URL de `fichero` en raw.githubusercontent.com.
+
+    Args:
+        fichero: Ruta del fichero dentro del repositorio.
+        ref: SHA del commit. Sin él se usa la rama, que el CDN de GitHub sirve
+            con hasta 5 minutos de retraso (Cache-Control: max-age=300).
+
+    Returns:
+        La URL, o None si el repositorio o la rama configurados no son válidos.
+    """
+    destino = _repositorio_y_rama()
+    if destino is None:
+        return None
+    repositorio, rama = destino
+    return f"https://raw.githubusercontent.com/{repositorio}/{ref or rama}/{fichero}"
+
+
+def _resolver_commit() -> tuple:
+    """SHA del último commit de la rama configurada, consultado a la API de GitHub.
+
+    raw.githubusercontent.com cachea cada rama 5 minutos en su CDN y no lo salta
+    ni con parámetros en la URL: justo tras publicar, «Comprobar» seguía viendo
+    la versión anterior. Una URL por SHA es inmutable y nunca sale caducada, y la
+    API sí responde al momento. Cuesta una petición del cupo anónimo de la API
+    (60 por hora y IP), de sobra con la caché de horas y la espera mínima al forzar.
+
+    Returns:
+        Tupla (sha, error): uno de los dos es None. No lanza.
+    """
+    destino = _repositorio_y_rama()
+    if destino is None:
+        return None, "El repositorio o la rama configurados no son válidos"
+    repositorio, rama = destino
+    peticion = Request(
+        f"https://api.github.com/repos/{repositorio}/commits/{rama}",
+        headers={"User-Agent": f"DockerManager/{__version__}", "Accept": "application/vnd.github.sha"},
+    )
+    try:
+        with urlopen(peticion, timeout=cfg_ini.UPDATE_TIMEOUT_SECONDS) as respuesta:
+            sha = respuesta.read(128).decode("ascii", errors="replace").strip()
+    except HTTPError as error:
+        return None, f"La API de GitHub respondió {error.code}"
+    except (TimeoutError, URLError, OSError) as error:
+        return None, f"No se pudo conectar con la API de GitHub ({error})"
+    if not _PATRON_SHA.match(sha):
+        return None, "La API de GitHub no devolvió un commit válido"
+    return sha, None
 
 
 def _descargar(fichero: str, maxBytes: int) -> tuple:
-    """Descarga un fichero de la rama configurada en GitHub.
+    """Descarga un fichero del commit resuelto en la última comprobación o, si no lo hay, de la rama.
 
     Args:
         fichero: Ruta del fichero dentro del repositorio.
@@ -110,7 +165,7 @@ def _descargar(fichero: str, maxBytes: int) -> tuple:
     Returns:
         Tupla (texto, error): uno de los dos es None. No lanza.
     """
-    url = _url(fichero)
+    url = _url(fichero, _cache.get("ref"))
     if url is None:
         return None, "El repositorio o la rama configurados no son válidos"
     peticion = Request(url, headers={"User-Agent": f"DockerManager/{__version__}", "Accept": "text/plain"})
@@ -237,6 +292,13 @@ def version_remota(forzar: bool = False) -> dict:
 
     with _cerrojo:
         if not _vigente(forzar):
+            # version.py y CHANGELOG.md se leen del mismo commit. Si la API falla
+            # (cupo agotado, caída) se sigue por la rama: puede llegar con unos
+            # minutos de retraso, pero llega.
+            ref, errorRef = _resolver_commit()
+            if errorRef:
+                logger.warning("Comprobación de versión por la rama, sin commit fijo: %s", errorRef)
+            _cache["ref"] = ref
             publicada, error = _consultar_github()
             # Con GitHub caído se conserva la última versión conocida: es más
             # útil que un hueco, y el error dice de cuándo es.

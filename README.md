@@ -1,10 +1,22 @@
-# DockerManager
+[🇪🇸 Español](docs/README.es.md) | [🇬🇧 English](README.md)
+
+<p align="center">
+  <img src="img/logo.svg" alt="DockerManager" width="128">
+</p>
+
+<h1 align="center">DockerManager</h1>
+
+<p align="center">
+  <a href="CHANGELOG.md"><img src="https://img.shields.io/badge/version-1.2.0-blue" alt="Version"></a>
+  <img src="https://img.shields.io/badge/Python-3.12-3776AB" alt="Python">
+  <img src="https://img.shields.io/badge/FastAPI-0.115-009688" alt="FastAPI">
+  <img src="https://img.shields.io/badge/Docker-Compose-2496ED" alt="Docker">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue" alt="License"></a>
+</p>
+
 ---
-> 🇬🇧 English | [🇪🇸 Español](docs/README.es.md)
 
-A lightweight web interface for managing Docker from the browser. Built with FastAPI and vanilla JavaScript — no frontend frameworks, no external runtime dependencies.
-
-![Python](https://img.shields.io/badge/Python-3.12-blue) ![FastAPI](https://img.shields.io/badge/FastAPI-0.115-green) ![Docker](https://img.shields.io/badge/Docker-SDK-blue)
+**Self-hosted** web interface for managing Docker from the browser. Built with FastAPI and vanilla JavaScript — no frontend frameworks, no external runtime dependencies.
 
 ![DockerManager main menu](img/mainMenu.png)
 
@@ -177,7 +189,10 @@ What has already been notified (published version, last update result) is stored
 dropdown: installed vs. latest published version (read from `version.py` on the GitHub
 branch), **Check versions** and **Update now**. A dot appears on the badge when a new version
 is out. **Update now** opens a confirmation window with both versions and the release notes of
-every version in between, read from `CHANGELOG.md` on the same branch. The app cannot rebuild its own container without killing itself mid-update, so the
+every version in between, read from `CHANGELOG.md` on the same branch. Both files are read
+from the branch's latest commit, resolved through the GitHub API, so **Check versions** sees a
+new release right after it is pushed instead of up to 5 minutes later (GitHub's raw CDN cache).
+If the API is unavailable it falls back to the branch URL. The app cannot rebuild its own container without killing itself mid-update, so the
 button only leaves a request; a small **watcher** on the host (a systemd timer that checks
 every 30 s) picks it up and runs `docker-update.sh`. Install it once:
 

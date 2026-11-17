@@ -1,10 +1,22 @@
-# DockerManager
+[🇪🇸 Español](README.es.md) | [🇬🇧 English](../README.md)
+
+<p align="center">
+  <img src="../img/logo.svg" alt="DockerManager" width="128">
+</p>
+
+<h1 align="center">DockerManager</h1>
+
+<p align="center">
+  <a href="../CHANGELOG.md"><img src="https://img.shields.io/badge/versi%C3%B3n-1.2.0-blue" alt="Versión"></a>
+  <img src="https://img.shields.io/badge/Python-3.12-3776AB" alt="Python">
+  <img src="https://img.shields.io/badge/FastAPI-0.115-009688" alt="FastAPI">
+  <img src="https://img.shields.io/badge/Docker-Compose-2496ED" alt="Docker">
+  <a href="../LICENSE"><img src="https://img.shields.io/badge/Licencia-MIT-blue" alt="Licencia"></a>
+</p>
+
 ---
-> [🇬🇧 English](../README.md) | 🇪🇸 Español
 
-Interfaz web ligera para gestionar Docker desde el navegador. Construida con FastAPI y JavaScript puro — sin frameworks de frontend, sin dependencias de runtime externas.
-
-![Python](https://img.shields.io/badge/Python-3.12-blue) ![FastAPI](https://img.shields.io/badge/FastAPI-0.115-green) ![Docker](https://img.shields.io/badge/Docker-SDK-blue)
+Interfaz web **autoalojada** para gestionar Docker desde el navegador. Construida con FastAPI y JavaScript puro — sin frameworks de frontend, sin dependencias de runtime externas.
 
 ![Menú principal de DockerManager](../img/mainMenu.png)
 
@@ -176,7 +188,10 @@ Lo ya avisado (versión publicada, último resultado de actualización) se guard
 actualización: versión instalada y última publicada (leída del `version.py` de la rama en
 GitHub), **Comprobar versiones** y **Actualizar ahora**. Si hay versión nueva, la versión lleva
 un punto ámbar. **Actualizar ahora** abre una ventana de confirmación con las dos versiones y las
-novedades de cada versión intermedia, leídas del `CHANGELOG.md` de la misma rama. La app no puede reconstruir su propio contenedor sin matarse a mitad, así que el
+novedades de cada versión intermedia, leídas del `CHANGELOG.md` de la misma rama. Los dos se
+leen del último commit de la rama, que se consulta a la API de GitHub, así que **Comprobar versiones**
+ve una versión nueva en cuanto se publica y no hasta 5 minutos después (caché del CDN de GitHub).
+Si la API no responde, se leen de la rama. La app no puede reconstruir su propio contenedor sin matarse a mitad, así que el
 botón solo deja una petición; la recoge un **vigilante** en el host (un temporizador de systemd
 que mira cada 30 s) y ejecuta `docker-update.sh`. Se instala una vez:
 

@@ -119,3 +119,102 @@ def test_consultar_novedades_descarga_el_changelog(monkeypatch):
     novedades, error = actualizacion._consultar_novedades("999.0.0")
     assert error is None and pedidos == ["CHANGELOG.md"]
     assert novedades[0]["grupos"][0]["elementos"] == ["Todo nuevo"]
+
+
+# ── Commit fijo: evita la caché de 5 minutos del CDN de raw.githubusercontent ──
+SHA = "bcd08e161d5fcb44ff5dcc653dffb5df93ef7f72"
+
+
+class RespuestaFalsa:
+    """Imita lo justo de la respuesta de urlopen (context manager + read)."""
+
+    def __init__(self, cuerpo: bytes):
+        self.cuerpo = cuerpo
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+    def read(self, maxBytes: int = -1) -> bytes:
+        return self.cuerpo
+
+
+@pytest.fixture
+def cacheLimpia(monkeypatch):
+    monkeypatch.setattr(actualizacion, "_cache", {})
+    monkeypatch.setattr(actualizacion.cfg_ini, "UPDATE_CHECK", True)
+    monkeypatch.setattr(actualizacion.cfg_ini, "UPDATE_REPO", "usuario/repo")
+    monkeypatch.setattr(actualizacion.cfg_ini, "UPDATE_BRANCH", "main")
+
+
+def test_url_usa_el_sha_si_lo_hay(cacheLimpia):
+    assert actualizacion._url("version.py", SHA) == f"https://raw.githubusercontent.com/usuario/repo/{SHA}/version.py"
+    assert actualizacion._url("version.py") == "https://raw.githubusercontent.com/usuario/repo/main/version.py"
+
+
+def test_resolver_commit_devuelve_el_sha(cacheLimpia, monkeypatch):
+    pedidas = []
+
+    def urlopenFalso(peticion, timeout):
+        pedidas.append((peticion.full_url, peticion.get_header("Accept")))
+        return RespuestaFalsa(SHA.encode() + b"\n")
+
+    monkeypatch.setattr(actualizacion, "urlopen", urlopenFalso)
+    assert actualizacion._resolver_commit() == (SHA, None)
+    assert pedidas == [("https://api.github.com/repos/usuario/repo/commits/main", "application/vnd.github.sha")]
+
+
+def test_resolver_commit_rechaza_respuesta_que_no_es_un_sha(cacheLimpia, monkeypatch):
+    monkeypatch.setattr(actualizacion, "urlopen", lambda peticion, timeout: RespuestaFalsa(b"<html>nope</html>"))
+    sha, error = actualizacion._resolver_commit()
+    assert sha is None and "commit" in error
+
+
+def test_resolver_commit_con_red_caida_no_lanza(cacheLimpia, monkeypatch):
+    def urlopenFalso(peticion, timeout):
+        raise actualizacion.URLError("sin red")
+
+    monkeypatch.setattr(actualizacion, "urlopen", urlopenFalso)
+    sha, error = actualizacion._resolver_commit()
+    assert sha is None and "API de GitHub" in error
+
+
+def test_resolver_commit_con_repositorio_invalido_no_pide_nada(cacheLimpia, monkeypatch):
+    monkeypatch.setattr(actualizacion.cfg_ini, "UPDATE_REPO", "../otro")
+    monkeypatch.setattr(actualizacion, "urlopen", lambda *a, **k: pytest.fail("no debe pedir nada"))
+    assert actualizacion._resolver_commit()[0] is None
+
+
+def test_version_remota_lee_del_commit_resuelto(cacheLimpia, monkeypatch):
+    urls = []
+
+    def urlopenFalso(peticion, timeout):
+        urls.append(peticion.full_url)
+        if "api.github.com" in peticion.full_url:
+            return RespuestaFalsa(SHA.encode())
+        if peticion.full_url.endswith("version.py"):
+            return RespuestaFalsa(b'__version__ = "999.0.0"\n')
+        return RespuestaFalsa("## [999.0.0] - 2030-01-01\n### Añadido\n- Nuevo\n".encode())
+
+    monkeypatch.setattr(actualizacion, "urlopen", urlopenFalso)
+    remota = actualizacion.version_remota(forzar=True)
+    assert remota["publicada"] == "999.0.0" and remota["hayNueva"] is True
+    assert all(SHA in url for url in urls if "raw.githubusercontent.com" in url)
+    assert len([u for u in urls if "raw.githubusercontent.com" in u]) == 2
+
+
+def test_version_remota_sin_api_sigue_por_la_rama(cacheLimpia, monkeypatch):
+    urls = []
+
+    def urlopenFalso(peticion, timeout):
+        urls.append(peticion.full_url)
+        if "api.github.com" in peticion.full_url:
+            raise actualizacion.HTTPError(peticion.full_url, 403, "rate limit", {}, None)
+        return RespuestaFalsa(f'__version__ = "{actualizacion.__version__}"\n'.encode())
+
+    monkeypatch.setattr(actualizacion, "urlopen", urlopenFalso)
+    remota = actualizacion.version_remota(forzar=True)
+    assert remota["publicada"] == actualizacion.__version__ and remota["error"] is None
+    assert "https://raw.githubusercontent.com/usuario/repo/main/version.py" in urls
