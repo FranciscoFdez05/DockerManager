@@ -172,7 +172,7 @@ Lo ya avisado (versión publicada, último resultado de actualización) se guard
 ./docker-update.sh
 ```
 
-**Desde la web** — pulsa la versión de la cabecera (`v1.1.0`) y se abre el desplegable de
+**Desde la web** — pulsa la versión de la cabecera (`v1.2.0`) y se abre el desplegable de
 actualización: versión instalada y última publicada (leída del `version.py` de la rama en
 GitHub), **Comprobar versiones** y **Actualizar ahora**. Si hay versión nueva, la versión lleva
 un punto ámbar. **Actualizar ahora** abre una ventana de confirmación con las dos versiones y las

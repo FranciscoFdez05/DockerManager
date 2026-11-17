@@ -113,7 +113,7 @@ def test_consultar_novedades_descarga_el_changelog(monkeypatch):
 
     def descargarFalso(fichero, maxBytes):
         pedidos.append(fichero)
-        return f"## [999.0.0] - 2030-01-01\n### Añadido\n- Todo nuevo\n", None
+        return "## [999.0.0] - 2030-01-01\n### Añadido\n- Todo nuevo\n", None
 
     monkeypatch.setattr(actualizacion, "_descargar", descargarFalso)
     novedades, error = actualizacion._consultar_novedades("999.0.0")

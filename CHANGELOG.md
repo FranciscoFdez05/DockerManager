@@ -3,6 +3,21 @@
 El formato sigue [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/).
 `docker-update.sh` imprime la primera sección al actualizar.
 
+## [1.2.0] - 2026-11-17
+
+### Añadido
+- Telegram se configura desde **Ajustes › Avisos** sin reiniciar (`configTelegram.py`). El token se comprueba con Telegram (`getMe`) antes de guardarlo y nunca vuelve al navegador. También se editan los IDs autorizados, las categorías y los umbrales. Se guarda en `data/telegram-config.json` (`0600`). Prioridad: `.env` > web > `config.ini`; lo que venga del `.env` aparece bloqueado en la web. Cambiar el bot o los IDs avisa a los IDs anteriores con la IP que hizo el cambio. Endpoints `PUT` y `DELETE /api/ajustes/telegram`.
+- Botón **Borrar sin usar** en cada grupo de imágenes: borra, una a una, las imágenes del grupo que no usa ningún contenedor (versiones antiguas de una app).
+
+### Cambiado
+- Scrollbars finas y oscuras en toda la app. Los modales hacen scroll en su cuerpo en lugar de desbordar la pantalla, y los títulos largos se recortan con puntos suspensivos.
+- Hoja de estilos: colores derivados y fuentes en variables, media queries agrupadas al final de mayor a menor ancho, estilos en línea del HTML sustituidos por clases y logo SVG definido una sola vez.
+- Anillo de foco visible al navegar con teclado en botones y campos, y sin animaciones si el sistema pide reducir el movimiento.
+
+### Corregido
+- La clase `hidden` solo ocultaba en algunos contextos: el modal **Nuevo contenedor** mostraba siempre una barra roja vacía y los formularios de login, configuración inicial y cambio de contraseña dejaban un hueco de más.
+- Sin `DM_UID` en el `.env` (modo root de compatibilidad), `dockermanager-permisos` pasaba el buzón de actualizaciones a root y el vigilante del host se quedaba sin permisos. Ahora no toca nada.
+
 ## [1.1.0] - 2026-11-17
 
 ### Añadido

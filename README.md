@@ -173,7 +173,7 @@ What has already been notified (published version, last update result) is stored
 ./docker-update.sh
 ```
 
-**From the web UI** — click the version badge in the header (`v1.1.0`) to open the update
+**From the web UI** — click the version badge in the header (`v1.2.0`) to open the update
 dropdown: installed vs. latest published version (read from `version.py` on the GitHub
 branch), **Check versions** and **Update now**. A dot appears on the badge when a new version
 is out. **Update now** opens a confirmation window with both versions and the release notes of
