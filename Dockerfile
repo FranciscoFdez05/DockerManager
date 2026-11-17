@@ -12,7 +12,7 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY main.py config.py version.py actualizacion.py limpieza.py servidor.py telegrama.py avisos.py ajustes.py seguridad.py clienteDocker.py config.ini ./
+COPY main.py config.py version.py actualizacion.py limpieza.py servidor.py telegrama.py avisos.py configTelegram.py ajustes.py seguridad.py clienteDocker.py config.ini ./
 COPY static/ ./static/
 
 # Usuario sin privilegios por defecto. docker-compose.yml lo sustituye por el

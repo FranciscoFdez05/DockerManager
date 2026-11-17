@@ -145,19 +145,25 @@ Everything is set in `config.ini`. Environment variables (`DATA_DIR`, `PORT`, `H
 
 #### Telegram
 
-The bot token and the authorized user IDs are **only** read from environment variables (the `.env` file), never from `config.ini`, which is public in the repository. If either one is missing or invalid, Telegram stays disabled.
+Telegram is configured from **Settings → Alerts** in the web UI and applied without restarting:
+
+1. Create the bot with [@BotFather](https://t.me/BotFather) (`/newbot`) and paste the token. It is checked against Telegram (`getMe`) before it is saved, and it is never sent back to the browser.
+2. Add the user IDs allowed to receive alerts and send commands, separated by commas. Get yours from [@userinfobot](https://t.me/userinfobot). Group IDs (negative) are rejected.
+3. Open a private chat with your bot and press **Start**. Telegram does not let a bot write to you first.
+4. Use **Send test** to check that messages arrive.
+
+The categories and thresholds can be changed from the same screen. Values saved from the web are stored in `telegram-config.json` in the data directory, with `0600` permissions, and take priority over `[telegram]` in `config.ini`. **Delete saved configuration** removes that file.
+
+If the token or the IDs change, the previously authorized IDs get a notice with the IP that made the change.
+
+Precedence: environment variables > web > `config.ini`. The token and the IDs can also be set in `.env`. In that case they **override** the web, and the UI shows them as locked:
 
 | Variable | Description |
 |---|---|
-| `TELEGRAM_BOT_TOKEN` | Bot token from [@BotFather](https://t.me/BotFather) (`/newbot`) |
-| `TELEGRAM_IDS_PERMITIDOS` | Comma-separated user IDs allowed to receive alerts and send commands. Get yours from [@userinfobot](https://t.me/userinfobot). Group IDs (negative) are rejected |
+| `TELEGRAM_BOT_TOKEN` | Bot token |
+| `TELEGRAM_IDS_PERMITIDOS` | Comma-separated authorized user IDs |
 
-1. Create the bot with @BotFather and copy the token.
-2. Add both variables to `.env` and restart: `./docker-up.sh`.
-3. Open a private chat with your bot and press **Start**. Telegram does not let a bot write to you first.
-4. Restart DockerManager and use **Settings → Alerts → Send test** to check that messages arrive.
-
-For a native install, add both variables to the service with `sudo systemctl edit dockergestor` (`[Service]` → `Environment=TELEGRAM_BOT_TOKEN=...`).
+For a native install, set them with `sudo systemctl edit dockergestor` (`[Service]` → `Environment=TELEGRAM_BOT_TOKEN=...`).
 
 What has already been notified (published version, last update result) is stored in `telegram.json` in the data directory, so a restart does not repeat it.
 
@@ -219,6 +225,7 @@ DockerManager/
 ├── limpieza.py          # Selective cleanup of old unused images and volumes
 ├── telegrama.py         # Telegram Bot API client, allow-list, alert queue
 ├── avisos.py            # What gets notified and when; read-only bot commands
+├── configTelegram.py    # Telegram settings editable from the web (.env > web > config.ini)
 ├── servidor.py          # Host metrics: CPU, memory, disk, temperatures
 ├── ajustes.py           # Read-only configuration summary for the Settings screen
 ├── seguridad.py         # Session, login rate limiting, client IP, WebSocket Origin check

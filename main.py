@@ -24,6 +24,7 @@ import servidor
 import limpieza
 import telegrama
 import avisos
+import configTelegram
 import ajustes
 import seguridad
 from clienteDocker import proveedor as dockerProveedor
@@ -930,10 +931,14 @@ def update_request():
 
 
 # ── Telegram ──────────────────────────────────────────────────────────────────
-# Ver telegrama.py (conexión, lista blanca) y avisos.py (qué se avisa). Sin
-# TELEGRAM_BOT_TOKEN y TELEGRAM_IDS_PERMITIDOS en el entorno no arranca nada.
+# Ver telegrama.py (conexión, lista blanca), avisos.py (qué se avisa) y
+# configTelegram.py (de dónde sale la configuración: .env > web > config.ini).
+# Sin token e IDs no arranca nada.
 _telegram: telegrama.ServicioTelegram | None = None
 _vigilancia: avisos.Vigilancia | None = None
+_almacenTelegram = configTelegram.AlmacenTelegram(os.path.join(DATA_DIR, configTelegram.nombreFichero))
+# Serializa guardar + reconfigurar: dos «Guardar» a la vez dejarían hilos huérfanos.
+_cerrojoTelegram = threading.Lock()
 
 
 def _avisar(categoria: str, texto: str, clave: str | None = None) -> None:
@@ -946,27 +951,36 @@ def _disco_pct() -> float:
     return psutil.disk_usage(cfg_ini.servidorRutaDisco).percent
 
 
-def _iniciarTelegram() -> None:
-    """Construye el servicio de Telegram y los hilos de vigilancia de lo que esté activado."""
+def _configTelegram() -> configTelegram.ConfigTelegram:
+    return configTelegram.efectiva(cfg_ini, _almacenTelegram.leer())
+
+
+def _construirTelegram(anterior: telegrama.ServicioTelegram | None = None) -> None:
+    """Construye el servicio de Telegram y los hilos de vigilancia de lo que esté activado.
+
+    Args:
+        anterior: Servicio recién detenido al reconfigurar (ver ``ServicioTelegram.iniciar``).
+    """
     global _telegram, _vigilancia
+    config = _configTelegram()
     comandos = avisos.crearComandos(__version__, lambda: _all_container_infos(dockerProveedor.obtener()), host_stats)
-    _telegram = telegrama.construir(cfg_ini.telegramToken, cfg_ini.telegramIdsPermitidos,
-                                    cfg_ini.telegramCategorias, comandos, cfg_ini.telegramTimeout)
+    _telegram = telegrama.construir(config.token, config.idsTexto, config.categoriasTexto, comandos,
+                                    config.timeoutSegundos)
     if _telegram is None:
         return
-    _telegram.iniciar()
+    _telegram.iniciar(anterior)
 
-    _vigilancia = avisos.Vigilancia(_avisar, cfg_ini.telegramIntervalo)
+    _vigilancia = avisos.Vigilancia(_avisar, config.intervaloSegundos)
     # Solo se registra lo activado: VigilanteActualizaciones marca como avisado
     # lo que ve, y con la categoría apagada se perdería el aviso al encenderla.
     if _telegram.acepta("contenedores"):
         _vigilancia.vigilarEventos(
             lambda: docker.from_env().events(decode=True, filters={"type": "container"}),
-            avisos.ProcesadorEventosDocker(cfg_ini.telegramReiniciosBucle, cfg_ini.telegramVentanaBucleMinutos * 60),
+            avisos.ProcesadorEventosDocker(config.reiniciosBucle, config.ventanaBucleMinutos * 60),
         )
     if _telegram.acepta("recursos"):
         _vigilancia.comprobarPeriodicamente("recursos", avisos.VigilanteRecursos(
-            servidor.lector.temperatura_cpu, _disco_pct, cfg_ini.servidorTempCritica, cfg_ini.telegramDiscoAviso,
+            servidor.lector.temperatura_cpu, _disco_pct, cfg_ini.servidorTempCritica, config.discoAvisoPct,
         ).comprobar)
     if _telegram.acepta("actualizaciones"):
         _vigilancia.comprobarPeriodicamente("actualizaciones", avisos.VigilanteActualizaciones(
@@ -974,6 +988,12 @@ def _iniciarTelegram() -> None:
             avisos.EstadoPersistente(os.path.join(DATA_DIR, "telegram.json")), __version__,
         ).comprobar)
     _vigilancia.iniciar()
+
+
+def _iniciarTelegram() -> None:
+    """Arranque de la app: servicio de Telegram y aviso de arranque."""
+    with _cerrojoTelegram:
+        _construirTelegram()
     _avisar("sistema", avisos.textoArranque(__version__, socket.gethostname()), "arranque")
 
 
@@ -984,6 +1004,26 @@ def _detenerTelegram() -> None:
         _telegram.detener()
 
 
+def _reconfigurarTelegram(antes: configTelegram.ConfigTelegram, ip: str) -> None:
+    """Sustituye el servicio en marcha por uno con la configuración guardada ahora.
+
+    Si cambian el token o los IDs, se avisa por el servicio *anterior*: así
+    quien deja de recibir avisos se entera de que alguien lo ha cambiado.
+    Llamar con ``_cerrojoTelegram`` adquirido.
+    """
+    global _telegram, _vigilancia
+    anterior = _telegram
+    if anterior is not None and antes.credenciales() != _configTelegram().credenciales():
+        anterior.notificarSiempre(avisos.textoCambioTelegram(ip), "cambio-telegram")
+    _detenerTelegram()
+    _telegram, _vigilancia = None, None
+    _construirTelegram(anterior)
+
+
+def _comprobarTokenTelegram(token: str, timeout: int) -> str:
+    return telegrama.ClienteTelegram(token, timeout).obtenerBot()
+
+
 # ── Ajustes ───────────────────────────────────────────────────────────────────
 # Pantalla «Ajustes»: solo lectura de lo que hay en config.ini/.env (ver
 # ajustes.py) y la prueba de Telegram. Cambiar valores sigue siendo editar
@@ -991,8 +1031,46 @@ def _detenerTelegram() -> None:
 @app.get("/api/ajustes")
 def settings_summary():
     usuario = (load_config() or {}).get("username")
-    return {"ok": True, "version": __version__,
-            **ajustes.resumen(cfg_ini, usuario, _telegram is not None)}
+    config = _configTelegram()
+    datos = ajustes.resumen(configTelegram.vistaConfig(cfg_ini, config), usuario, _telegram is not None)
+    datos["telegram"].update(configTelegram.detalles(config, bool(_almacenTelegram.leer())))
+    return {"ok": True, "version": __version__, **datos}
+
+
+@app.put("/api/ajustes/telegram")
+def settings_telegram_update(body: dict, request: Request):
+    """Guarda la configuración de Telegram desde la web y la aplica sin reiniciar.
+
+    Solo se cambian los campos enviados. El token se valida contra Telegram
+    (``getMe``) antes de guardarlo y nunca se devuelve.
+    """
+    with _cerrojoTelegram:
+        antes = _configTelegram()
+        try:
+            nuevo = configTelegram.aplicarCambios(
+                body, _almacenTelegram.leer(), cfg_ini,
+                lambda token: _comprobarTokenTelegram(token, antes.timeoutSegundos))
+        except telegrama.ConfiguracionInvalida as e:
+            raise HTTPException(400, str(e))
+        try:
+            _almacenTelegram.guardar(nuevo)
+        except OSError as e:
+            raise HTTPException(500, f"No se pudo guardar la configuración de Telegram: {e}")
+        _reconfigurarTelegram(antes, _client_ip(request))
+        return {"ok": True, "activo": _telegram is not None}
+
+
+@app.delete("/api/ajustes/telegram")
+def settings_telegram_reset(request: Request):
+    """Borra lo guardado desde la web: vuelven a mandar el .env y config.ini."""
+    with _cerrojoTelegram:
+        antes = _configTelegram()
+        try:
+            _almacenTelegram.borrar()
+        except OSError as e:
+            raise HTTPException(500, f"No se pudo borrar la configuración de Telegram: {e}")
+        _reconfigurarTelegram(antes, _client_ip(request))
+        return {"ok": True, "activo": _telegram is not None}
 
 
 @app.post("/api/ajustes/telegram/prueba")

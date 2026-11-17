@@ -507,10 +507,14 @@ const SETTINGS_SECTIONS = {
 
 const TELEGRAM_STATUS = {
   activo: ['ok', 'Listo.', 'Los avisos se envían por Telegram.'],
-  sin_configurar: ['', 'Sin configurar.', 'Define TELEGRAM_BOT_TOKEN y TELEGRAM_IDS_PERMITIDOS en el .env y reinicia.'],
-  incompleto: ['warn', 'Incompleto.', 'Falta una de las dos variables del .env; sin las dos, Telegram no arranca.'],
-  error: ['err', 'No arrancó.', 'Las variables están, pero algún valor no es válido. El motivo exacto está en el log de la app.'],
+  sin_configurar: ['', 'Sin configurar.', 'Pon el token del bot y tu ID abajo y pulsa Guardar.'],
+  incompleto: ['warn', 'Incompleto.', 'Falta el token o los IDs; sin los dos, Telegram no arranca.'],
+  error: ['err', 'No arrancó.', 'El token y los IDs están, pero algún valor no es válido. El motivo exacto está en el log de la app.'],
 };
+
+// Origen de cada valor de Telegram: el .env manda sobre lo guardado en la web.
+const TG_FROM_ENV = stPill('Desde .env');
+const TG_ENV_HELP = 'Definido en el <code>.env</code>, que tiene prioridad. Para gestionarlo desde aquí, quítalo de ahí y reinicia.';
 
 function savedSettingsSection() {
   try {
@@ -627,42 +631,83 @@ function settingsAlerts(d) {
   const t = d.telegram;
   const [level, label, text] = TELEGRAM_STATUS[t.estado] || ['', esc(t.estado), ''];
   const active = t.estado === 'activo';
-  const idsSub = t.errorIds ? `<span class="st-pill err">${esc(t.errorIds)}</span>`
-    : t.ids.length ? `Reciben avisos y pueden usar comandos: ${t.ids.map(i => `<code>${esc(i)}</code>`).join(', ')}.`
-    : 'Consigue tu ID con <a href="https://t.me/userinfobot" target="_blank" rel="noopener noreferrer">@userinfobot</a> y ponlo en <code>TELEGRAM_IDS_PERMITIDOS</code>.';
+  const tokenFromEnv = t.origenToken === 'env';
+  const idsFromEnv = t.origenIds === 'env';
+  const botLink = t.bot
+    ? `<a href="https://t.me/${encodeURIComponent(t.bot)}" target="_blank" rel="noopener noreferrer">@${esc(t.bot)}</a>` : '';
 
+  // Token: nunca llega al navegador. Si ya hay uno guardado, el campo solo
+  // aparece al pulsar «Reemplazar»; vacío al guardar = se conserva el actual.
+  let tokenSub, tokenRight = '';
+  if (tokenFromEnv) {
+    tokenSub = TG_ENV_HELP;
+    tokenRight = TG_FROM_ENV;
+  } else if (t.tokenConfigurado && !settingsState.tgReplaceToken) {
+    tokenSub = `${stPill('Configurado', 'ok')} ${botLink ? `Bot ${botLink}.` : ''} El valor no se muestra nunca aquí.`;
+    tokenRight = '<button type="button" onclick="settingsReplaceToken()">Reemplazar</button>';
+  } else {
+    tokenSub = 'Crea un bot con <a href="https://t.me/BotFather" target="_blank" rel="noopener noreferrer">@BotFather</a> (<code>/newbot</code>) y pega aquí el token. Se comprueba con Telegram antes de guardarlo.';
+    tokenRight = `<input id="st-tg-token" class="form-input st-input" type="password" autocomplete="off" spellcheck="false"
+      placeholder="123456789:AA…" aria-label="Token del bot">`;
+  }
+
+  const idsList = t.ids.length ? `Reciben avisos y pueden usar comandos: ${t.ids.map(i => `<code>${esc(i)}</code>`).join(', ')}.` : '';
+  const idsSub = t.errorIds ? `<span class="st-pill err">${esc(t.errorIds)}</span>`
+    : idsFromEnv ? `${TG_ENV_HELP} ${idsList}`
+    : 'Separados por comas. Consigue tu ID con <a href="https://t.me/userinfobot" target="_blank" rel="noopener noreferrer">@userinfobot</a>. Cualquier otro que escriba al bot se ignora.';
+  const idsRight = idsFromEnv ? TG_FROM_ENV
+    : `<input id="st-tg-ids" class="form-input st-input" type="text" inputmode="numeric" autocomplete="off" spellcheck="false"
+        placeholder="123456789, 987654321" value="${esc(t.ids.join(', '))}" aria-label="IDs autorizados">`;
+
+  const editable = !tokenFromEnv || !idsFromEnv;
   const connection = stCard({
     icon: 'send', title: 'Telegram',
     desc: 'Bot para recibir avisos en el móvil y consultar el estado con comandos de solo lectura. Qué avisos llegan se elige en la tarjeta de al lado.',
-    source: '.env',
+    source: tokenFromEnv && idsFromEnv ? '.env' : 'data/telegram-config.json',
     body: `
       <div class="st-status"><span class="st-dot ${level}"></span><span><b>${label}</b> ${text}</span></div>
       ${stList([
-        stStep(1, t.tokenConfigurado, 'Token del bot',
-          t.tokenConfigurado ? `${stPill('Configurado', 'ok')} El valor no se muestra nunca aquí.`
-            : 'Crea un bot con <a href="https://t.me/BotFather" target="_blank" rel="noopener noreferrer">@BotFather</a> y pon el token en <code>TELEGRAM_BOT_TOKEN</code>.'),
-        stStep(2, t.ids.length > 0, 'IDs autorizados', idsSub),
+        stStep(1, t.tokenConfigurado, 'Token del bot', tokenSub, tokenRight),
+        stStep(2, t.ids.length > 0, 'IDs autorizados', idsSub, idsRight),
         stStep(3, false, 'Abrir el chat con el bot',
-          'Abre el chat con tu bot y pulsa <b>Iniciar</b>. Un bot no puede escribir primero a nadie: sin este paso los avisos no llegan. Si otra persona le escribe, lo ignora.'),
+          `Abre el chat con ${botLink || 'tu bot'} y pulsa <b>Iniciar</b>. Un bot no puede escribir primero a nadie: sin este paso los avisos no llegan. Si otra persona le escribe, lo ignora.`),
         stStep(4, false, 'Comprobar', 'Manda un mensaje de prueba a los IDs autorizados, sin depender de las categorías activas.',
           `<button id="st-tg-test" type="button" onclick="sendTelegramTest()" ${active ? '' : 'disabled'}>Enviar prueba</button>`),
-      ])}`,
+      ])}
+      ${editable || t.guardadoWeb ? `<div class="st-actions">
+        ${editable ? '<button id="st-tg-save" type="button" class="btn-accent" onclick="saveTelegramConnection()">Guardar y aplicar</button>' : ''}
+        ${settingsState.tgReplaceToken ? '<button type="button" onclick="settingsReplaceToken(false)">Cancelar</button>' : ''}
+        ${t.guardadoWeb ? '<button type="button" onclick="resetTelegramConfig()">Borrar configuración guardada</button>' : ''}
+      </div>` : ''}`,
   });
 
+  const r = t.rangos || {};
+  const num = (id, key, value) => {
+    const [min, max] = r[key] || [];
+    return `<input id="${id}" class="form-input st-num" type="number" step="1" min="${esc(min)}" max="${esc(max)}" value="${esc(value)}">`;
+  };
   const categories = stCard({
     icon: 'bell', title: 'Qué se avisa',
-    desc: 'Categorías activas y umbrales de los avisos.',
-    source: 'config.ini › [telegram]',
+    desc: 'Categorías activas y umbrales de los avisos. Lo que guardes aquí tiene prioridad sobre config.ini.',
+    source: t.guardadoWeb ? 'data/telegram-config.json' : 'config.ini › [telegram]',
     body: `
       ${t.errorCategorias ? `<div class="st-help err">${esc(t.errorCategorias)}</div>` : ''}
-      ${stList(t.categorias.map(c => stRow(esc(c.id), esc(c.descripcion), c.activa ? stPill('Activa', 'ok') : stPill('Apagada'))))}
+      ${stList(t.categorias.map(c => stRow(esc(c.id), esc(c.descripcion),
+        `<input class="st-check" type="checkbox" data-tg-cat="${esc(c.id)}" ${c.activa ? 'checked' : ''} aria-label="Avisar de ${esc(c.id)}">`)))}
       ${stList([
-        stRow('Disco lleno', 'Porcentaje de uso a partir del que se avisa.', stValue(`${t.discoAvisoPct} %`)),
+        stRow('Disco lleno', 'Porcentaje de uso a partir del que se avisa.',
+          `<span class="st-inline">${num('st-tg-disco', 'discoAvisoPct', t.discoAvisoPct)} %</span>`),
         stRow('Bucle de reinicios', 'Caídas de un mismo contenedor dentro de la ventana.',
-          stValue(`${t.reiniciosBucle} en ${t.ventanaBucleMinutos} min`)),
-        stRow('Comprobación de recursos', 'Cada cuánto se miran temperatura, disco y versión nueva.', stValue(`${t.intervaloSegundos} s`)),
-        stRow('Timeout de la API', null, stValue(`${t.timeoutSegundos} s`)),
-      ])}`,
+          `<span class="st-inline">${num('st-tg-reinicios', 'reiniciosBucle', t.reiniciosBucle)} en
+           ${num('st-tg-ventana', 'ventanaBucleMinutos', t.ventanaBucleMinutos)} min</span>`),
+        stRow('Comprobación de recursos', 'Cada cuánto se miran temperatura, disco y versión nueva.',
+          `<span class="st-inline">${num('st-tg-intervalo', 'intervaloSegundos', t.intervaloSegundos)} s</span>`),
+        stRow('Timeout de la API', null,
+          `<span class="st-inline">${num('st-tg-timeout', 'timeoutSegundos', t.timeoutSegundos)} s</span>`),
+      ])}
+      <div class="st-actions">
+        <button id="st-tg-alerts-save" type="button" class="btn-accent" onclick="saveTelegramAlerts()">Guardar y aplicar</button>
+      </div>`,
   });
   return [connection, categories];
 }
@@ -758,6 +803,68 @@ async function sendTelegramTest() {
     toast(`Telegram: ${err.message}`, 'error');
   } finally {
     btn.disabled = false;
+  }
+}
+
+function settingsReplaceToken(on = true) {
+  settingsState.tgReplaceToken = on;
+  renderSettings();
+  if (on) q('st-tg-token')?.focus();
+}
+
+async function putTelegramSettings(body, btn) {
+  if (btn) btn.disabled = true;
+  try {
+    const res = await fetch('/api/ajustes/telegram', {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    });
+    if (!res.ok) throw new Error(await apiError(res));
+    const r = await res.json();
+    settingsState.tgReplaceToken = false;
+    toast(r.activo ? 'Telegram guardado y aplicado' : 'Guardado. Telegram sigue inactivo: falta el token o los IDs', r.activo ? 'success' : 'info');
+    await loadSettings();
+  } catch (err) {
+    toast(`Telegram: ${err.message}`, 'error');
+    if (btn) btn.disabled = false;
+  }
+}
+
+function saveTelegramConnection() {
+  const body = {};
+  const token = q('st-tg-token')?.value.trim();
+  if (token) body.token = token;
+  const ids = q('st-tg-ids');
+  if (ids) body.ids = ids.value.trim();
+  if (!Object.keys(body).length) { toast('No hay nada que guardar', 'info'); return; }
+  putTelegramSettings(body, q('st-tg-save'));
+}
+
+function saveTelegramAlerts() {
+  const body = {
+    categorias: [...document.querySelectorAll('#st-body [data-tg-cat]')].filter(c => c.checked).map(c => c.dataset.tgCat),
+  };
+  const fields = {
+    discoAvisoPct: 'st-tg-disco', reiniciosBucle: 'st-tg-reinicios', ventanaBucleMinutos: 'st-tg-ventana',
+    intervaloSegundos: 'st-tg-intervalo', timeoutSegundos: 'st-tg-timeout',
+  };
+  for (const [key, id] of Object.entries(fields)) {
+    const value = Number(q(id).value);
+    if (!Number.isInteger(value)) { toast('Los umbrales deben ser números enteros', 'error'); q(id).focus(); return; }
+    body[key] = value;
+  }
+  putTelegramSettings(body, q('st-tg-alerts-save'));
+}
+
+async function resetTelegramConfig() {
+  if (!confirm('¿Borrar la configuración de Telegram guardada desde la web? Volverán a aplicarse el .env y config.ini.')) return;
+  try {
+    const res = await fetch('/api/ajustes/telegram', { method: 'DELETE' });
+    if (!res.ok) throw new Error(await apiError(res));
+    settingsState.tgReplaceToken = false;
+    toast('Configuración de Telegram borrada', 'success');
+    await loadSettings();
+  } catch (err) {
+    toast(`Telegram: ${err.message}`, 'error');
   }
 }
 
@@ -1153,9 +1260,40 @@ function renderImages(list) {
   q('images-body').innerHTML = groupByOwner(list, img => matchGroupByName(imageRepo(img))).map(g => {
     const key = `img:${g.key}`;
     const mb = g.items.reduce((t, i) => t + i.size_mb, 0).toFixed(1);
-    return groupRow(key, g.title, `${plural(g.items.length, 'imagen', 'imágenes')} · ${mb} MB`, 6) +
+    const old = g.items.filter(i => !i.used_by.length);
+    const bulk = old.length
+      ? `<button class="btn-xs btn-red" onclick="removeGroupImages(this.dataset.k)" data-k="${esc(g.key)}" title="Borrar las imágenes del grupo que no usa ningún contenedor">&#x1F5D1; Borrar sin usar (${old.length})</button>`
+      : '';
+    return groupRow(key, g.title, `${plural(g.items.length, 'imagen', 'imágenes')} · ${mb} MB`, 6, bulk) +
       (collapsed[key] ? '' : g.items.map(row).join(''));
   }).join('');
+}
+
+// Borra las imágenes sin contenedores de un grupo (versiones antiguas de una app).
+// En serie: borrados paralelos de imágenes que comparten capas chocan en Docker.
+async function removeGroupImages(groupKey) {
+  const group = groupByOwner(data.images, img => matchGroupByName(imageRepo(img)))
+    .find(g => g.key === groupKey);
+  const targets = group ? group.items.filter(i => !i.used_by.length) : [];
+  if (!targets.length) { toast('Nada que borrar', 'info'); return; }
+  const mb = targets.reduce((t, i) => t + i.size_mb, 0).toFixed(1);
+  if (!confirm(`¿Borrar ${plural(targets.length, 'imagen', 'imágenes')} sin usar de "${group.title}" (${mb} MB)?`)) return;
+  toast(`${group.title}: borrando…`, 'info');
+  const errors = [];
+  for (const img of targets) {
+    // Con varios tags Docker exige force para borrar por ID; ya está comprobado que no la usa nadie
+    const force = img.tags.length > 1 ? '?force=true' : '';
+    try {
+      const res = await fetch(`/api/images/${img.id}${force}`, { method: 'DELETE' });
+      if (!res.ok) throw new Error(await apiError(res));
+    } catch (err) {
+      errors.push(`${img.tags[0] || img.id}: ${err.message}`);
+    }
+  }
+  const done = targets.length - errors.length;
+  if (errors.length) toast(`${plural(done, 'imagen borrada', 'imágenes borradas')}; errores: ${errors.join('; ')}`, 'error');
+  else toast(`${group.title}: ${plural(done, 'imagen borrada', 'imágenes borradas')}`, 'success');
+  setTimeout(loadImages, 600);
 }
 
 function renderVolumes(list) {

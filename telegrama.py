@@ -45,6 +45,8 @@ maxEsperaReintentoSegundos = 60
 esperaMinimaErrorSegundos = 5
 esperaMaximaErrorSegundos = 300
 intervaloRegistroDescartadosSegundos = 60
+# Long-polling (30 s) más el timeout de la petición, con margen.
+esperaRelevoSegundos = 50
 
 categoriasValidas = frozenset({"sistema", "contenedores", "seguridad", "actualizaciones", "recursos"})
 
@@ -217,6 +219,20 @@ class ClienteTelegram:
             "disable_web_page_preview": True,
         })
 
+    def obtenerBot(self) -> str:
+        """Comprueba el token con ``getMe``.
+
+        Returns:
+            El usuario del bot (sin ``@``).
+
+        Raises:
+            ErrorTelegram: Si Telegram rechaza el token o no responde.
+        """
+        resultado = self.llamar("getMe", {})
+        if not isinstance(resultado, dict) or not resultado.get("is_bot"):
+            raise ErrorTelegram("getMe: la respuesta no corresponde a un bot")
+        return str(resultado.get("username") or "")
+
     def obtenerActualizaciones(self, offset: int | None, esperaSegundos: int) -> list[dict]:
         """Long-polling de mensajes nuevos.
 
@@ -340,7 +356,7 @@ class Notificador:
         self._hilo.start()
 
     def detener(self) -> None:
-        """Pide al hilo que termine tras el envío en curso."""
+        """Pide al hilo que termine tras enviar lo que quede en la cola."""
         self._parada.set()
 
     def _bucle(self) -> None:
@@ -348,6 +364,10 @@ class Notificador:
             # Espera acotada para poder ver la señal de parada aunque no haya avisos.
             if self.enviarSiguiente(espera=1.0):
                 self._parada.wait(self._intervalo)
+        # Al reconfigurar desde la web, el aviso de cambio va por el servicio
+        # que se detiene: sin vaciar la cola se perdería.
+        while self.enviarSiguiente(espera=0):
+            pass
 
     def _enviarA(self, chatId: int, texto: str) -> None:
         try:
@@ -474,11 +494,22 @@ class Receptor:
         """Pide al hilo que termine al acabar la petición en curso."""
         self._parada.set()
 
+    def esperarFin(self, timeout: float) -> None:
+        """Espera a que el hilo termine (como mucho ``timeout`` segundos)."""
+        if self._hilo is not None:
+            self._hilo.join(timeout)
+
     def _bucle(self) -> None:
         espera = esperaMinimaErrorSegundos
         while not self._parada.is_set():
             try:
-                self.procesar(self._cliente.obtenerActualizaciones(self._offset, self._espera))
+                actualizaciones = self._cliente.obtenerActualizaciones(self._offset, self._espera)
+                # El long-polling puede volver después de detenerlo (p. ej. al
+                # quitar un ID desde la web): ese lote ya no se atiende con la
+                # lista blanca antigua. Lo recoge el receptor nuevo.
+                if self._parada.is_set():
+                    return
+                self.procesar(actualizaciones)
                 espera = esperaMinimaErrorSegundos
             except ErrorTelegram as error:
                 # 409 = hay otra instancia leyendo con el mismo token o un webhook activo.
@@ -568,10 +599,29 @@ class ServicioTelegram:
         """
         return self._notificador.notificar(texto)
 
-    def iniciar(self) -> None:
-        """Arranca los hilos de envío y recepción."""
+    def notificarSiempre(self, texto: str, clave: str | None = None) -> bool:
+        """Encola un aviso sin filtrar por categoría (cambios de la propia configuración)."""
+        return self._notificador.notificar(texto, clave)
+
+    def iniciar(self, anterior: "ServicioTelegram | None" = None) -> None:
+        """Arranca los hilos de envío y recepción.
+
+        Args:
+            anterior: Servicio que se acaba de detener al reconfigurar. Dos
+                lectores con el mismo token se pisan (HTTP 409), así que el
+                receptor nuevo espera en segundo plano a que el anterior
+                termine su long-polling.
+        """
         self._notificador.iniciar()
-        self._receptor.iniciar()
+        if anterior is None:
+            self._receptor.iniciar()
+            return
+
+        def iniciarTrasAnterior() -> None:
+            anterior._receptor.esperarFin(esperaRelevoSegundos)
+            self._receptor.iniciar()
+
+        threading.Thread(target=iniciarTrasAnterior, name="telegram-relevo", daemon=True).start()
 
     def detener(self) -> None:
         """Pide a los hilos que terminen."""

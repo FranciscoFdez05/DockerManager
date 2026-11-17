@@ -4,6 +4,7 @@ import io
 import json
 import os
 import sys
+import threading
 from urllib.error import HTTPError, URLError
 
 import pytest
@@ -321,3 +322,83 @@ def test_construir_y_filtrar_categorias():
     assert not servicio.acepta("recursos")
     assert servicio.avisar("seguridad", "x")
     assert not servicio.avisar("recursos", "y")
+
+
+# ── Reconfiguración desde la web ──────────────────────────────────────────────
+def test_obtenerBot():
+    cliente = telegrama.ClienteTelegram(TOKEN, timeout=5,
+                                        abrir=AbrirFalso({"ok": True, "result": {"is_bot": True, "username": "mi_bot"}}))
+    assert cliente.obtenerBot() == "mi_bot"
+
+
+def test_obtenerBot_respuesta_que_no_es_un_bot():
+    cliente = telegrama.ClienteTelegram(TOKEN, timeout=5, abrir=AbrirFalso({"ok": True, "result": {"is_bot": False}}))
+    with pytest.raises(telegrama.ErrorTelegram):
+        cliente.obtenerBot()
+
+
+class ClientePolling(ClienteFalso):
+    """getUpdates que, mientras está «en vuelo», ve cómo se detiene el receptor."""
+
+    def __init__(self, alVolver):
+        super().__init__()
+        self.alVolver = alVolver
+
+    def obtenerActualizaciones(self, offset, espera):
+        self.alVolver()
+        return [actualizacion(texto="/estado")]
+
+
+def test_receptor_detenido_no_atiende_el_lote_en_vuelo():
+    r = None
+    cliente = ClientePolling(lambda: r.detener())
+    r = receptor(cliente)
+    r.iniciar()
+    r.esperarFin(5)
+    assert cliente.enviados == []  # el lote llegó tras detenerlo: no se responde con la lista vieja
+
+
+def test_notificador_vacia_la_cola_al_detenerse():
+    cliente = ClienteFalso()
+    n = telegrama.Notificador(cliente, frozenset({1}), intervaloEnvio=0)
+    n.notificar("uno")
+    n.notificar("dos")
+    n.detener()  # detenido antes de arrancar: aun así envía lo pendiente
+    n.iniciar()
+    n._hilo.join(5)
+    assert [texto for _, texto in cliente.enviados] == ["uno", "dos"]
+
+
+def test_servicio_relevo_espera_al_receptor_anterior():
+    orden = []
+
+    class ReceptorFalso:
+        def __init__(self, nombre):
+            self.nombre = nombre
+
+        def iniciar(self):
+            orden.append(f"inicia {self.nombre}")
+
+        def esperarFin(self, timeout):
+            orden.append(f"espera {self.nombre}")
+
+        def detener(self):
+            pass
+
+    notificador = telegrama.Notificador(ClienteFalso(), frozenset({1}))
+    anterior = telegrama.ServicioTelegram(notificador, ReceptorFalso("viejo"), frozenset())
+    nuevo = telegrama.ServicioTelegram(telegrama.Notificador(ClienteFalso(), frozenset({1})),
+                                       ReceptorFalso("nuevo"), frozenset())
+    nuevo.iniciar(anterior)
+    for _ in range(100):
+        if len(orden) == 2:
+            break
+        threading.Event().wait(0.02)
+    nuevo.detener()
+    assert orden == ["espera viejo", "inicia nuevo"]
+
+
+def test_notificarSiempre_ignora_las_categorias():
+    servicio = telegrama.construir(TOKEN, "123", "", {"/ayuda": lambda: "ayuda"}, 5)
+    assert not servicio.avisar("seguridad", "x")
+    assert servicio.notificarSiempre("y")

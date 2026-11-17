@@ -7,7 +7,9 @@ services:
     build: .
     image: dockermanager:${DOCKERMANAGER_VERSION:-latest}
     user: "0:0"
-    entrypoint: ["chown", "-R", "${DM_UID:-0}:${DM_GID:-0}", "/data", "/actualizacion"]
+    # Sin DM_UID en el .env (modo root de compatibilidad) no se toca nada: un
+    # chown a root dejaría el buzón sin permisos para el vigilante del host.
+    entrypoint: ["sh", "-c", "[ -z '${DM_UID:-}' ] || chown -R '${DM_UID:-}:${DM_GID:-}' /data /actualizacion"]
     cap_drop: [ALL]
     cap_add: [CHOWN]
     security_opt: ["no-new-privileges:true"]

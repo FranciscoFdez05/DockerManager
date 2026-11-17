@@ -322,6 +322,12 @@ def textoCambioPassword(ip: str) -> str:
     return f"<b>Contraseña cambiada</b>\nLa contraseña de DockerManager se ha cambiado desde <code>{escapar(ip)}</code>."
 
 
+def textoCambioTelegram(ip: str) -> str:
+    """Aviso, por la configuración anterior, de que han cambiado el bot o los IDs autorizados."""
+    return (f"<b>Configuración de Telegram cambiada</b>\nSe han cambiado el bot o los IDs autorizados "
+            f"desde <code>{escapar(ip)}</code>. Si no has sido tú, revisa Ajustes › Avisos.")
+
+
 def textoConfiguracionInicial(ip: str) -> str:
     """Aviso de creación del usuario administrador."""
     return f"<b>Configuración inicial</b>\nSe ha creado el usuario de DockerManager desde <code>{escapar(ip)}</code>."

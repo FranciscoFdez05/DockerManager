@@ -12,19 +12,24 @@
 </head>
 <body>
 
+  <!-- Logo definido una sola vez; cada aparición lo reutiliza con <use href="#logo">. -->
+  <svg class="svg-sprite" aria-hidden="true" focusable="false">
+    <symbol id="logo" viewBox="0 0 32 32" fill="none">
+      <rect x="2" y="14" width="6" height="5" rx="1" fill="#58a6ff"/>
+      <rect x="10" y="14" width="6" height="5" rx="1" fill="#58a6ff"/>
+      <rect x="18" y="14" width="6" height="5" rx="1" fill="#58a6ff"/>
+      <rect x="10" y="7" width="6" height="5" rx="1" fill="#58a6ff"/>
+      <rect x="18" y="7" width="6" height="5" rx="1" fill="#58a6ff"/>
+      <path d="M28 17c1-1 2-3 1-5s-3-3-5-2H23c-1-5-5-8-10-7" stroke="#58a6ff" stroke-width="1.5" stroke-linecap="round"/>
+      <path d="M2 19c0 3 2 5 5 5h18c3 0 5-2 4-5" stroke="#58a6ff" stroke-width="1.5" stroke-linecap="round"/>
+    </symbol>
+  </svg>
+
   <!-- ── Setup modal (primer arranque) ── -->
   <div id="setup-modal" class="modal hidden login-overlay">
     <div class="login-box">
       <div class="login-logo">
-        <svg width="40" height="40" viewBox="0 0 32 32" fill="none">
-          <rect x="2" y="14" width="6" height="5" rx="1" fill="#58a6ff"/>
-          <rect x="10" y="14" width="6" height="5" rx="1" fill="#58a6ff"/>
-          <rect x="18" y="14" width="6" height="5" rx="1" fill="#58a6ff"/>
-          <rect x="10" y="7" width="6" height="5" rx="1" fill="#58a6ff"/>
-          <rect x="18" y="7" width="6" height="5" rx="1" fill="#58a6ff"/>
-          <path d="M28 17c1-1 2-3 1-5s-3-3-5-2H23c-1-5-5-8-10-7" stroke="#58a6ff" stroke-width="1.5" stroke-linecap="round"/>
-          <path d="M2 19c0 3 2 5 5 5h18c3 0 5-2 4-5" stroke="#58a6ff" stroke-width="1.5" stroke-linecap="round"/>
-        </svg>
+        <svg width="40" height="40" aria-hidden="true"><use href="#logo"/></svg>
         <h2>Bienvenido a DockerManager</h2>
       </div>
       <p class="login-sub">Primera vez que arrancas la app. Crea tu cuenta de administrador.</p>
@@ -40,15 +45,7 @@
   <div id="login-modal" class="modal hidden login-overlay">
     <div class="login-box">
       <div class="login-logo">
-        <svg width="40" height="40" viewBox="0 0 32 32" fill="none">
-          <rect x="2" y="14" width="6" height="5" rx="1" fill="#58a6ff"/>
-          <rect x="10" y="14" width="6" height="5" rx="1" fill="#58a6ff"/>
-          <rect x="18" y="14" width="6" height="5" rx="1" fill="#58a6ff"/>
-          <rect x="10" y="7" width="6" height="5" rx="1" fill="#58a6ff"/>
-          <rect x="18" y="7" width="6" height="5" rx="1" fill="#58a6ff"/>
-          <path d="M28 17c1-1 2-3 1-5s-3-3-5-2H23c-1-5-5-8-10-7" stroke="#58a6ff" stroke-width="1.5" stroke-linecap="round"/>
-          <path d="M2 19c0 3 2 5 5 5h18c3 0 5-2 4-5" stroke="#58a6ff" stroke-width="1.5" stroke-linecap="round"/>
-        </svg>
+        <svg width="40" height="40" aria-hidden="true"><use href="#logo"/></svg>
         <h2>DockerManager</h2>
       </div>
       <p class="login-sub">Introduce tus credenciales para continuar</p>
@@ -69,7 +66,7 @@
           <button class="btn-close" onclick="closeModal('chpass-modal')">&#x2715; Cerrar</button>
         </div>
       </div>
-      <div class="pull-body" style="display:flex;flex-direction:column;gap:10px">
+      <div class="pull-body form-stack">
         <input id="cp-current" type="password" class="form-input" placeholder="Contraseña actual" />
         <input id="cp-new" type="password" class="form-input" placeholder="Nueva contraseña (mín. 8 caracteres)" />
         <input id="cp-confirm" type="password" class="form-input" placeholder="Confirmar nueva contraseña" />
@@ -81,15 +78,7 @@
 
   <header>
     <div class="header-left">
-      <svg width="26" height="26" viewBox="0 0 32 32" fill="none">
-        <rect x="2" y="14" width="6" height="5" rx="1" fill="#58a6ff"/>
-        <rect x="10" y="14" width="6" height="5" rx="1" fill="#58a6ff"/>
-        <rect x="18" y="14" width="6" height="5" rx="1" fill="#58a6ff"/>
-        <rect x="10" y="7" width="6" height="5" rx="1" fill="#58a6ff"/>
-        <rect x="18" y="7" width="6" height="5" rx="1" fill="#58a6ff"/>
-        <path d="M28 17c1-1 2-3 1-5s-3-3-5-2H23c-1-5-5-8-10-7" stroke="#58a6ff" stroke-width="1.5" stroke-linecap="round"/>
-        <path d="M2 19c0 3 2 5 5 5h18c3 0 5-2 4-5" stroke="#58a6ff" stroke-width="1.5" stroke-linecap="round"/>
-      </svg>
+      <svg width="26" height="26" aria-hidden="true"><use href="#logo"/></svg>
       <h1>DockerManager</h1>
       <!-- Abre el desplegable de actualización; el punto ámbar sale si hay versión nueva. -->
       <button id="app-version-btn" class="app-version app-version-btn" data-app-version type="button"
@@ -174,7 +163,7 @@
           <option value="running">Corriendo</option>
           <option value="stopped">Detenidos</option>
         </select>
-        <input id="filter-input" class="filter-input filter-first" type="text" placeholder="Filtrar..." oninput="filterContainers()" />
+        <input id="filter-input" class="filter-input" type="text" placeholder="Filtrar..." oninput="filterContainers()" />
       </div>
       <div class="table-wrapper">
         <table id="containers-table">
@@ -200,7 +189,7 @@
       <div class="section-header">
         <h2>Im&aacute;genes</h2>
         <span id="image-count" class="count-badge"></span>
-        <button class="btn-accent" style="margin-left:8px" onclick="openPullModal()">&#x2B07; Pull</button>
+        <button class="btn-accent" onclick="openPullModal()">&#x2B07; Pull</button>
       </div>
       <div class="table-wrapper">
         <table>
@@ -389,7 +378,7 @@
         </div>
       </div>
       <div class="pull-body">
-        <p style="color:var(--dim);font-size:12px;margin-bottom:10px">
+        <p class="modal-hint">
           Solo se listan imágenes y volúmenes que no usa ningún contenedor (ni siquiera uno parado).
           Borrar un volumen elimina sus datos de forma permanente.
         </p>
@@ -400,7 +389,7 @@
           <button class="btn-accent" onclick="loadCleanup()">&#x21BA; Buscar</button>
         </div>
         <div id="cleanup-list" class="cleanup-list"></div>
-        <div style="display:flex;justify-content:flex-end;margin-top:12px">
+        <div class="form-actions">
           <button id="cleanup-run-btn" class="btn-red" onclick="runCleanup()" disabled>Borrar seleccionados</button>
         </div>
       </div>
@@ -440,12 +429,12 @@
         </div>
       </div>
       <div class="pull-body">
-        <p style="color:var(--dim);font-size:12px;margin-bottom:10px">Ej: nginx:latest, ubuntu:22.04</p>
-        <div style="display:flex;gap:8px">
+        <p class="modal-hint">Ej: nginx:latest, ubuntu:22.04</p>
+        <div class="input-row">
           <input id="pull-tag-input" type="text" class="form-input" placeholder="imagen:tag" />
           <button class="btn-accent" onclick="doPull()">&#x2B07; Pull</button>
         </div>
-        <div id="pull-status" style="margin-top:12px;font-size:13px"></div>
+        <div id="pull-status" class="pull-status"></div>
       </div>
     </div>
   </div>
@@ -491,7 +480,7 @@
           <span id="term-container-name"></span>
         </div>
         <div class="modal-actions">
-          <span id="term-status" class="dim" style="font-size:12px"></span>
+          <span id="term-status" class="dim modal-meta"></span>
           <button class="btn-close" onclick="closeTerminal()">&#x2715; Cerrar</button>
         </div>
       </div>
@@ -533,7 +522,7 @@
               <option value="">Por defecto</option>
             </select>
           </div>
-          <div class="form-group" style="grid-column:1/-1">
+          <div class="form-group form-group-full">
             <label class="form-label">Comando (opcional)</label>
             <input id="c-command" type="text" class="form-input" placeholder="Deja vacío para usar el CMD de la imagen" />
           </div>
@@ -564,7 +553,7 @@
         </div>
 
         <div id="create-error" class="create-error hidden"></div>
-        <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:8px">
+        <div class="form-actions">
           <button onclick="closeModal('create-modal')">Cancelar</button>
           <button class="btn-green" onclick="submitCreate()">&#x25B6; Crear contenedor</button>
         </div>

@@ -1,6 +1,8 @@
 """Tests de los endpoints de main.py con FastAPI TestClient y un Docker falso."""
 
+import json
 import os
+import threading
 import sys
 from types import SimpleNamespace
 
@@ -231,3 +233,83 @@ def test_estaticos_comprimidos(cliente):
     respuesta = cliente.get("/app.js", headers={"Accept-Encoding": "gzip"})
     assert respuesta.status_code == 200
     assert respuesta.headers["content-encoding"] == "gzip"
+
+
+# ── Ajustes › Telegram desde la web ───────────────────────────────────────────
+TOKEN_TG = "222222222:WEB" + "w" * 32
+
+
+@pytest.fixture
+def telegramWeb(main, cliente, tmp_path, monkeypatch):
+    """Telegram sin .env, con almacén temporal y sin red (getUpdates vacío, envíos registrados)."""
+    import configTelegram
+    import telegrama
+
+    enviados = []
+
+    def llamar(self, metodo, datos, timeout=None):
+        if metodo == "getUpdates":
+            threading.Event().wait(0.05)
+            return []
+        if metodo == "sendMessage":
+            enviados.append((datos["chat_id"], datos["text"]))
+        return {}
+
+    monkeypatch.setattr(telegrama.ClienteTelegram, "llamar", llamar)
+    monkeypatch.setattr(main, "_comprobarTokenTelegram", lambda token, timeout: "mi_bot")
+    monkeypatch.setattr(main.cfg_ini, "telegramToken", "")
+    monkeypatch.setattr(main.cfg_ini, "telegramIdsPermitidos", "")
+    monkeypatch.setattr(main, "_almacenTelegram", configTelegram.AlmacenTelegram(str(tmp_path / "tg.json")))
+    monkeypatch.setattr(main, "_telegram", None)
+    monkeypatch.setattr(main, "_vigilancia", None)
+    configurar(cliente)
+    yield enviados
+    main._detenerTelegram()
+
+
+def test_ajustes_telegram_requiere_sesion(cliente):
+    assert cliente.put("/api/ajustes/telegram", json={"ids": "1"}).status_code in (401, 403)
+
+
+def test_ajustes_telegram_se_guarda_y_activa_sin_reiniciar(cliente, main, telegramWeb):
+    respuesta = cliente.put("/api/ajustes/telegram", json={"token": TOKEN_TG, "ids": "123"})
+    assert respuesta.status_code == 200
+    assert respuesta.json()["activo"] is True
+    assert main._telegram is not None
+    datos = cliente.get("/api/ajustes").json()["telegram"]
+    assert datos["estado"] == "activo" and datos["origenToken"] == "web" and datos["bot"] == "mi_bot"
+    assert datos["ids"] == [123]
+    assert TOKEN_TG not in json.dumps(cliente.get("/api/ajustes").json())
+
+
+def test_ajustes_telegram_cambiar_ids_avisa_a_los_anteriores(cliente, main, telegramWeb):
+    cliente.put("/api/ajustes/telegram", json={"token": TOKEN_TG, "ids": "123"})
+    anterior = main._telegram
+    assert cliente.put("/api/ajustes/telegram", json={"ids": "456"}).status_code == 200
+    assert main._telegram is not anterior
+    for _ in range(100):
+        if telegramWeb:
+            break
+        threading.Event().wait(0.05)
+    assert any(chat == 123 and "cambiada" in texto for chat, texto in telegramWeb)
+
+
+def test_ajustes_telegram_valores_invalidos(cliente, telegramWeb):
+    assert cliente.put("/api/ajustes/telegram", json={"ids": "-100"}).status_code == 400
+    assert cliente.put("/api/ajustes/telegram", json={"discoAvisoPct": 5}).status_code == 400
+    assert cliente.put("/api/ajustes/telegram", json={"origenToken": "env"}).status_code == 400
+
+
+def test_ajustes_telegram_no_pisa_el_env(cliente, main, telegramWeb, monkeypatch):
+    monkeypatch.setattr(main.cfg_ini, "telegramToken", "111111111:ENV" + "e" * 32)
+    respuesta = cliente.put("/api/ajustes/telegram", json={"token": TOKEN_TG})
+    assert respuesta.status_code == 400
+    assert ".env" in respuesta.json()["detail"]
+
+
+def test_ajustes_telegram_borrar(cliente, main, telegramWeb):
+    cliente.put("/api/ajustes/telegram", json={"token": TOKEN_TG, "ids": "123"})
+    respuesta = cliente.delete("/api/ajustes/telegram")
+    assert respuesta.status_code == 200 and respuesta.json()["activo"] is False
+    assert main._telegram is None
+    assert cliente.get("/api/ajustes").json()["telegram"]["estado"] == "sin_configurar"
