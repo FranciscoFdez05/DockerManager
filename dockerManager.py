@@ -2,6 +2,7 @@
 # Script para lanzar comandos Docker comunes desde un menu interactivo
 # Uso: python3 dockerManager.py
 
+import shlex
 import subprocess
 import sys
 import os
@@ -14,8 +15,50 @@ def clearScreen():
 
 def runCommand(commandStr):
     # Ejecuta un comando de shell y muestra la salida en tiempo real
+    # Se trocea con shlex y se ejecuta sin shell=True: ningun texto se
+    # interpreta como codigo de shell. Las sustituciones $(...) que antes
+    # resolvia la shell las hace dockerIds().
     print(f"\n>>> Ejecutando: {commandStr}\n")
-    resultCode = subprocess.run(commandStr, shell=True)
+    resultCode = subprocess.run(shlex.split(commandStr))
+    if resultCode.returncode != 0:
+        print(f"\n[!] El comando termino con codigo de salida {resultCode.returncode}")
+    else:
+        print("\n[OK] Comando completado")
+
+
+def dockerIds(*psArgs: str) -> list[str]:
+    """Devuelve los IDs que lista `docker ps -q` con los argumentos dados.
+
+    Args:
+        psArgs: Argumentos extra para `docker ps -q` (por ejemplo "-a").
+
+    Returns:
+        Lista de IDs; vacia si no hay contenedores o si docker falla.
+    """
+    resultado = subprocess.run(["docker", "ps", "-q", *psArgs], capture_output=True, text=True)
+    if resultado.returncode != 0:
+        print(f"\n[!] docker ps fallo: {resultado.stderr.strip()}")
+        return []
+    return resultado.stdout.split()
+
+
+def runOnContainers(action: str, *psArgs: str) -> None:
+    """Ejecuta `docker <action>` sobre los contenedores de `docker ps -q <psArgs>`.
+
+    Equivale a `docker <action> $(docker ps -q <psArgs>)` sin pasar por la shell.
+    Sin contenedores no se ejecuta nada (docker fallaria por falta de argumentos).
+
+    Args:
+        action: Subcomando de docker, por ejemplo "stop" o "rm".
+        psArgs: Argumentos extra para `docker ps -q`.
+    """
+    ids = dockerIds(*psArgs)
+    psCommand = " ".join(["docker", "ps", "-q", *psArgs])
+    print(f"\n>>> Ejecutando: docker {action} $({psCommand})\n")
+    if not ids:
+        print("[OK] No hay contenedores a los que aplicarlo")
+        return
+    resultCode = subprocess.run(["docker", action, *ids])
     if resultCode.returncode != 0:
         print(f"\n[!] El comando termino con codigo de salida {resultCode.returncode}")
     else:
@@ -29,12 +72,12 @@ def confirmAction(promptText):
 
 
 def stopAllContainers():
-    runCommand("docker stop $(docker ps -q)")
+    runOnContainers("stop")
 
 
 def removeAllContainers():
     if confirmAction("Esto eliminara TODOS los contenedores (parados y corriendo si se fuerzan). Continuar?"):
-        runCommand("docker rm $(docker ps -aq)")
+        runOnContainers("rm", "-a")
 
 
 def pruneImages():
@@ -64,7 +107,7 @@ def cleanAll():
         return
 
     stopAllContainers()
-    runCommand("docker rm $(docker ps -aq)")
+    runOnContainers("rm", "-a")
     runCommand("docker image prune -a -f")
     runCommand("docker volume prune -f")
     runCommand("docker network prune -f")

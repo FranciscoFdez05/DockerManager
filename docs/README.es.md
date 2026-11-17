@@ -36,18 +36,33 @@ Interfaz web ligera para gestionar Docker desde el navegador. Construida con Fas
 - Conectar y desconectar contenedores de redes desde el modal de inspección
 
 ### Sistema
-- Barra de estadísticas del host (CPU%, RAM, disco) actualizada cada 4 segundos vía `psutil`
+- Barra de estadísticas del host (CPU%, RAM, disco y temperatura de CPU si la hay) actualizada cada 4 segundos vía `psutil`
+- Ventana **Servidor**: estado del host en vivo, refrescado cada 3 segundos mientras está abierta: CPU (total, por núcleo, frecuencia, carga media), RAM y swap, uso de disco y velocidad de lectura/escritura, temperaturas y ventiladores, tiempo encendido y gráfica histórica de CPU / RAM / temperatura. Los valores se ponen en ámbar o rojo al pasar sus umbrales
 - Información del demonio Docker: versión, SO, kernel, arquitectura y driver de almacenamiento
 - Limpieza con un clic: contenedores detenidos, imágenes huérfanas, volúmenes sin uso y redes orphan
+- Ventana **Limpiar**: lista las imágenes y volúmenes que no usa ningún contenedor (ni siquiera uno parado) y tienen más de N días (30 por defecto), permite elegir imágenes, volúmenes o ambos y borra solo esos
 
 ### Seguridad
-- Cookie de sesión: `HttpOnly`, `SameSite=Strict`
+- Cookie de sesión: `HttpOnly`, `SameSite=Strict`; la sesión caduca en el servidor y sobrevive a los reinicios del contenedor (en el volumen de datos solo se guarda su HMAC); el logout y el cambio de contraseña la invalidan
 - Hash de contraseñas: bcrypt (coste 12)
-- Protección contra fuerza bruta: 5 intentos fallidos → bloqueo de IP por 15 minutos
+- Protección contra fuerza bruta: 5 intentos fallidos → bloqueo de IP por 15 minutos. `X-Forwarded-For` se ignora salvo que la conexión venga de un proxy de `trusted_proxies`
+- El login ejecuta bcrypt aunque el usuario no exista: el tiempo de respuesta no revela usuarios válidos
+- Los WebSockets (logs, stats, terminal) rechazan el handshake si `Origin` no coincide con el host
+- Scripts y estilos del CDN fijados con Subresource Integrity (`integrity`)
+- El contenedor corre sin root, con sistema de archivos de solo lectura, `cap_drop: ALL` y `no-new-privileges`
 - Mitigación de XSS: todo el contenido dinámico escapado; cabeceras CSP
 - Anti-clickjacking: `X-Frame-Options: DENY`
 - Prevención de sniffing MIME: `X-Content-Type-Options: nosniff`
 - Comparación de credenciales en tiempo constante con `secrets.compare_digest()`
+
+### Avisos por Telegram (opcional)
+- Contenedores caídos (código de salida distinto de 0), muertes por falta de memoria (OOM), healthchecks `unhealthy` y bucles de reinicios
+- Seguridad: login correcto (con IP), IP bloqueada, cambio de contraseña y configuración inicial
+- Versión nueva publicada y resultado de la actualización (correcta o fallida, con la salida del script)
+- Temperatura de CPU crítica y disco casi lleno, con aviso de recuperación
+- Comandos de solo lectura: `/estado`, `/contenedores`, `/ayuda`
+- Solo los IDs de `TELEGRAM_IDS_PERMITIDOS` reciben avisos y obtienen respuesta, y solo por chat privado. Los mensajes de cualquier otro se descartan sin leer su texto ni contestar
+- Long-polling, sin webhook: no se expone ningún puerto adicional
 
 ### PWA
 Instalable como aplicación de escritorio o móvil desde Chrome, Edge o Safari.
@@ -92,6 +107,8 @@ cd DockerManager
 
 `docker-up.sh` crea el `.env` con una `SECRET_KEY` recién generada, lee el puerto de escucha de `[server] port` en `config.ini` y levanta el stack publicado en todas las interfaces. Al terminar imprime la URL de la LAN.
 
+También escribe en el `.env` `DM_UID`, `DM_GID` (tu usuario) y `DOCKER_GID` (grupo dueño de `/var/run/docker.sock`): el contenedor corre con ese usuario, no como root, y un servicio de un solo uso, `dockermanager-permisos`, le cede el volumen de datos antes de arrancar la app. Ten en cuenta que el acceso al socket de Docker sigue equivaliendo a root en el host.
+
 ### Instalación nativa (Ubuntu + systemd)
 
 ```bash
@@ -114,11 +131,51 @@ Todo se ajusta en `config.ini`. Las variables de entorno (`DATA_DIR`, `PORT`, `H
 | `security` | `bcrypt_cost` | `12` | Coste del hash bcrypt |
 | `security` | `max_login_attempts` | `5` | Intentos fallidos antes del bloqueo |
 | `security` | `lockout_minutes` | `15` | Duración del bloqueo |
+| `security` | `trusted_proxies` | vacío | IPs/redes CIDR de proxies inversos, separadas por comas, de los que se acepta `X-Forwarded-For` |
+| `servidor` | `temperatura_aviso` | `70` | Temperatura de aviso (ºC) si el sensor no publica la suya |
+| `servidor` | `temperatura_critica` | `85` | Temperatura crítica (ºC) si el sensor no publica la suya |
+| `servidor` | `ruta_disco` | `/` | Ruta cuyo sistema de ficheros mide la ventana Servidor |
+| `telegram` | `notificar` | todas | Categorías de aviso: `sistema`, `contenedores`, `seguridad`, `actualizaciones`, `recursos` |
+| `telegram` | `timeout_segundos` | `10` | Timeout de cada petición a la API de Telegram |
+| `telegram` | `intervalo_segundos` | `60` | Cada cuánto se comprueban recursos y actualizaciones |
+| `telegram` | `disco_aviso_pct` | `90` | Uso de disco (%) a partir del que se avisa |
+| `telegram` | `reinicios_bucle` | `3` | Caídas de un contenedor que cuentan como bucle de reinicios... |
+| `telegram` | `ventana_bucle_minutos` | `10` | ...dentro de estos minutos |
+
+#### Telegram
+
+El token del bot y los IDs autorizados se leen **solo** de variables de entorno (el `.env`), nunca de `config.ini`, que es público en el repositorio. Si falta alguno o no es válido, Telegram queda desactivado.
+
+| Variable | Descripción |
+|---|---|
+| `TELEGRAM_BOT_TOKEN` | Token del bot que da [@BotFather](https://t.me/BotFather) (`/newbot`) |
+| `TELEGRAM_IDS_PERMITIDOS` | IDs de usuario separados por comas que reciben avisos y pueden usar comandos. El tuyo te lo da [@userinfobot](https://t.me/userinfobot). Los IDs de grupo (negativos) se rechazan |
+
+1. Crea el bot con @BotFather y copia el token.
+2. Añade las dos variables al `.env` y reinicia: `./docker-up.sh`.
+3. Abre un chat privado con tu bot y pulsa **Iniciar**. Telegram no deja que un bot te escriba primero.
+4. Reinicia DockerManager y usa **Ajustes › Avisos › Enviar prueba** para comprobar que los mensajes llegan.
+
+En la instalación nativa, añade las dos variables al servicio con `sudo systemctl edit dockergestor` (`[Service]` → `Environment=TELEGRAM_BOT_TOKEN=...`).
+
+Lo ya avisado (versión publicada, último resultado de actualización) se guarda en `telegram.json` dentro del directorio de datos, para no repetirlo tras un reinicio.
 
 ### Actualización
 
 ```bash
 ./docker-update.sh
+```
+
+**Desde la web** — pulsa la versión de la cabecera (`v1.1.0`) y se abre el desplegable de
+actualización: versión instalada y última publicada (leída del `version.py` de la rama en
+GitHub), **Comprobar versiones** y **Actualizar ahora**. Si hay versión nueva, la versión lleva
+un punto ámbar. **Actualizar ahora** abre una ventana de confirmación con las dos versiones y las
+novedades de cada versión intermedia, leídas del `CHANGELOG.md` de la misma rama. La app no puede reconstruir su propio contenedor sin matarse a mitad, así que el
+botón solo deja una petición; la recoge un **vigilante** en el host (un temporizador de systemd
+que mira cada 30 s) y ejecuta `docker-update.sh`. Se instala una vez:
+
+```bash
+sudo ./tools/actualizador/instalar-vigilante.sh
 ```
 
 O manualmente:
@@ -138,6 +195,9 @@ A partir de ahí:
 - **Contenedores** — la tabla principal. Botones por fila para iniciar/detener/reiniciar/pausar; haz clic en un contenedor para abrir logs, terminal, estadísticas o inspección.
 - **Imágenes / Volúmenes / Redes** — pestañas para listar, descargar, inspeccionar y eliminar.
 - **Sistema** — información del host y del demonio, además del botón de limpieza.
+- **Servidor** — estado del host: CPU, memoria, disco, temperaturas y gráfica histórica. Dentro del contenedor, CPU, carga, memoria, E/S de disco y temperaturas son las del host (`/proc` y `/sys` no se aíslan por contenedor). No se muestran el tráfico de red ni los procesos del host: en modo bridge el contenedor solo ve los suyos. Las temperaturas necesitan un sensor expuesto en `/sys/class/hwmon`; las máquinas virtuales no suelen tenerlo.
+- **Limpiar** — botón de la cabecera que muestra las imágenes y volúmenes viejos sin usar antes de borrarlos. La antigüedad por defecto es `[limpieza] dias_por_defecto` en `config.ini`.
+- **Ajustes** — botón del engranaje en la cabecera. Vista de solo lectura de la configuración en vigor (`config.ini` y `.env`), agrupada en *Cuenta y seguridad*, *Avisos*, *Actualizaciones* y *Servidor y limpieza*, con las acciones relacionadas: cambiar la contraseña, mensaje de prueba de Telegram, comprobar/lanzar la actualización y abrir la ventana de limpieza. Los valores se siguen cambiando en `config.ini` / `.env` y se aplican al reiniciar. El token de Telegram nunca llega al navegador, ni enmascarado.
 
 Si otro equipo de la red no conecta, abre el puerto en el firewall del servidor.
 
@@ -154,6 +214,16 @@ DockerManager/
 ├── docker-up.sh         # Script de arranque (.env + puerto + compose up)
 ├── install.sh           # Instalador nativo (Ubuntu + systemd)
 ├── docker-update.sh    # Actualiza, comprueba y vuelve atrás si falla
+├── actualizacion.py     # Comprobación de versión y petición al vigilante
+├── limpieza.py          # Limpieza selectiva de imágenes y volúmenes viejos sin usar
+├── telegrama.py         # Cliente de la Bot API, lista blanca y cola de avisos
+├── avisos.py            # Qué se avisa y cuándo; comandos de solo lectura del bot
+├── servidor.py          # Métricas del host: CPU, memoria, disco, temperaturas
+├── ajustes.py           # Resumen de solo lectura de la configuración para «Ajustes»
+├── seguridad.py         # Sesión, límite de intentos, IP del cliente, Origin de los WebSocket
+├── clienteDocker.py     # Cliente de Docker compartido
+├── tests/               # Tests con pytest
+├── tools/actualizador/  # Vigilante del host (timer de systemd) que lanza docker-update.sh
 ├── docs/
 │   └── README.es.md     # Documentación en español
 └── static/
@@ -213,8 +283,13 @@ DockerManager/
 | `GET` | `/api/networks` | Listar redes |
 | `DELETE` | `/api/networks/{id}` | Eliminar red |
 | `GET` | `/api/system/info` | Info Docker + host |
-| `GET` | `/api/system/host` | CPU / RAM / disco |
+| `GET` | `/api/system/host` | CPU / RAM / disco / temperatura de CPU |
+| `GET` | `/api/system/metrics` | Métricas detalladas del host: CPU por núcleo, carga, memoria, swap, E/S de disco, temperaturas, ventiladores, tiempo encendido |
 | `POST` | `/api/system/prune` | Limpieza del sistema |
+| `GET` | `/api/limpieza` | Vista previa de imágenes/volúmenes viejos sin usar (`?dias=N`, por defecto el de `config.ini`) |
+| `POST` | `/api/limpieza` | Los borra: `{"dias": 30, "tipos": ["imagenes", "volumenes"]}` |
+| `GET` | `/api/actualizacion` | Versión instalada y publicada, y estado de la actualización (`?refrescar=1` salta la caché) |
+| `POST` | `/api/actualizacion` | Pide la actualización al vigilante del host |
 
 #### WebSockets
 

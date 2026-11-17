@@ -1,6 +1,7 @@
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Request, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import JSONResponse
+from fastapi.middleware.gzip import GZipMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
 import docker
 import docker.errors
@@ -11,38 +12,51 @@ import json
 import psutil
 import socket
 import os
-import hashlib
 import secrets
 import select as sel
 import bcrypt
 from collections import defaultdict
-from datetime import datetime, timedelta
+from datetime import datetime, timezone
+from functools import lru_cache
 import config as cfg_ini
+import actualizacion
+import servidor
+import limpieza
+import telegrama
+import avisos
+import ajustes
+import seguridad
+from clienteDocker import proveedor as dockerProveedor
+from contextlib import asynccontextmanager
 from version import __version__
 
-app = FastAPI(title="DockerManager", version=__version__)
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Arranca y detiene los hilos de Telegram junto con la app."""
+    _iniciarTelegram()
+    yield
+    _detenerTelegram()
+    dockerProveedor.cerrar()
+
+
+app = FastAPI(title="DockerManager", version=__version__, lifespan=lifespan)
 
 # ── Configuración persistente ─────────────────────────────────────────────────
 DATA_DIR = cfg_ini.DATA_DIR
 CONFIG_FILE = os.path.join(DATA_DIR, "config.json")
+SESSION_FILE = os.path.join(DATA_DIR, "session.json")
 
-
-def _ensure_data_dir():
-    os.makedirs(DATA_DIR, exist_ok=True)
+# Caché en memoria de config.json: el middleware lo consulta en cada petición.
+_credenciales = seguridad.AlmacenCredenciales(CONFIG_FILE)
 
 
 def load_config() -> dict | None:
-    try:
-        with open(CONFIG_FILE) as f:
-            return json.load(f)
-    except Exception:
-        return None
+    return _credenciales.cargar()
 
 
 def save_config(cfg: dict):
-    _ensure_data_dir()
-    with open(CONFIG_FILE, "w") as f:
-        json.dump(cfg, f, indent=2)
+    _credenciales.guardar(cfg)
 
 
 def hash_password(password: str) -> str:
@@ -52,64 +66,60 @@ def hash_password(password: str) -> str:
 def verify_password(password: str, hashed: str) -> bool:
     try:
         return bcrypt.checkpw(password.encode("utf-8"), hashed.encode("utf-8"))
-    except Exception:
+    except ValueError:  # hash vacío o corrupto
         return False
 
 
-# ── Sesión en memoria (se regenera en cada login) ─────────────────────────────
-# El token inicial se deriva de SECRET_KEY (la genera docker-up.sh en el .env)
-# para que reiniciar el contenedor no eche fuera a quien ya estaba dentro. Sin
-# SECRET_KEY se usa un token aleatorio y cada reinicio invalida las sesiones.
-_SECRET_KEY = os.getenv("SECRET_KEY", "")
+@lru_cache(maxsize=1)
+def _hash_relleno() -> str:
+    """Hash con el mismo coste que el real, para comparar cuando el usuario no
+    existe: así el login tarda lo mismo y no revela qué usuarios son válidos."""
+    return hash_password(secrets.token_hex(16))
 
 
-def _initial_token() -> str:
-    if _SECRET_KEY:
-        return hashlib.sha256(f"{_SECRET_KEY}:session".encode("utf-8")).hexdigest()
-    return secrets.token_hex(32)
+# ── Sesión ────────────────────────────────────────────────────────────────────
+# Un único token, regenerado en cada login. En DATA_DIR se guarda su HMAC con
+# SECRET_KEY (la genera docker-up.sh en el .env) y su caducidad: la sesión
+# sobrevive a los reinicios y el logout la invalida de verdad. Sin SECRET_KEY,
+# cada reinicio cierra la sesión.
+_sesion = seguridad.GestorSesion(SESSION_FILE, os.getenv("SECRET_KEY", ""), cfg_ini.SESSION_MAX_AGE_SECONDS)
 
 
-_session: dict = {"token": _initial_token()}
-
-
-def _get_token() -> str:
-    return _session["token"]
+def _sesion_valida(token: str | None) -> bool:
+    return _sesion.valida(token)
 
 
 def _new_token() -> str:
-    _session["token"] = secrets.token_hex(32)
-    return _session["token"]
+    return _sesion.crear()
+
+
+def _set_session_cookie(response: Response, token: str) -> None:
+    response.set_cookie(cfg_ini.SESSION_COOKIE_NAME, token, httponly=True, samesite="strict",
+                        max_age=cfg_ini.SESSION_MAX_AGE_SECONDS)
 
 
 # ── Rate limiting anti-fuerza-bruta ───────────────────────────────────────────
-_rate_lock = threading.Lock()
-_attempts: dict[str, list] = defaultdict(list)
 MAX_ATTEMPTS = cfg_ini.MAX_LOGIN_ATTEMPTS
 LOCKOUT_MIN = cfg_ini.LOCKOUT_MINUTES
+_limitador = seguridad.LimitadorIntentos(MAX_ATTEMPTS, LOCKOUT_MIN * 60)
+_proxies_confiables = seguridad.parsearProxies(cfg_ini.proxiesConfiables)
 
 
 def _is_locked(ip: str) -> bool:
-    with _rate_lock:
-        cutoff = datetime.utcnow() - timedelta(minutes=LOCKOUT_MIN)
-        _attempts[ip] = [t for t in _attempts[ip] if t > cutoff]
-        return len(_attempts[ip]) >= MAX_ATTEMPTS
+    return _limitador.bloqueada(ip)
 
 
 def _record_fail(ip: str):
-    with _rate_lock:
-        _attempts[ip].append(datetime.utcnow())
+    _limitador.registrarFallo(ip)
 
 
 def _clear_attempts(ip: str):
-    with _rate_lock:
-        _attempts[ip] = []
+    _limitador.limpiar(ip)
 
 
 def _client_ip(request: Request) -> str:
-    forwarded = request.headers.get("X-Forwarded-For")
-    if forwarded:
-        return forwarded.split(",")[0].strip()
-    return request.client.host if request.client else "unknown"
+    return seguridad.ipCliente(request.client.host if request.client else None,
+                               request.headers, _proxies_confiables)
 
 
 # ── Middleware: cabeceras de seguridad ────────────────────────────────────────
@@ -122,7 +132,9 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
             response.headers["Cache-Control"] = "no-cache"
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["X-Frame-Options"] = "DENY"
-        response.headers["X-XSS-Protection"] = "1; mode=block"
+        # "0" desactiva el filtro XSS heredado: el modo block permitía filtrar
+        # información entre orígenes y la protección real ya la da la CSP.
+        response.headers["X-XSS-Protection"] = "0"
         response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
         cdn = cfg_ini.CDN_JSDELIVR
         response.headers["Content-Security-Policy"] = (
@@ -147,13 +159,15 @@ class AuthMiddleware(BaseHTTPMiddleware):
         cfg = load_config()
         if not cfg:
             return JSONResponse({"detail": "Setup requerido"}, status_code=403)
-        if request.cookies.get(cfg_ini.SESSION_COOKIE_NAME) != _get_token():
+        if not _sesion_valida(request.cookies.get(cfg_ini.SESSION_COOKIE_NAME)):
             return JSONResponse({"detail": "No autorizado"}, status_code=401)
         return await call_next(request)
 
 
 app.add_middleware(SecurityHeadersMiddleware)
 app.add_middleware(AuthMiddleware)
+# app.js y style.css pesan decenas de KB; JSON pequeños no compensa comprimirlos.
+app.add_middleware(GZipMiddleware, minimum_size=1024)
 
 
 # ── Health ────────────────────────────────────────────────────────────────────
@@ -163,7 +177,7 @@ def health():
     docker-update.sh y el HEALTHCHECK de la imagen para distinguir «el proceso está
     arriba» de «la aplicación funciona»."""
     try:
-        docker.from_env().ping()
+        dockerProveedor.obtener().ping()
     except Exception:
         return JSONResponse({"status": "error", "docker": False, "version": __version__}, status_code=503)
     return {"status": "ok", "docker": True, "version": __version__}
@@ -175,12 +189,12 @@ def auth_status(request: Request):
     cfg = load_config()
     if not cfg:
         return {"setup_needed": True, "authenticated": False}
-    authenticated = request.cookies.get(cfg_ini.SESSION_COOKIE_NAME) == _get_token()
+    authenticated = _sesion_valida(request.cookies.get(cfg_ini.SESSION_COOKIE_NAME))
     return {"setup_needed": False, "authenticated": authenticated}
 
 
 @app.post("/api/auth/setup")
-def auth_setup(body: dict, response: Response):
+def auth_setup(body: dict, response: Response, request: Request):
     if load_config():
         raise HTTPException(403, "La aplicación ya está configurada")
 
@@ -197,10 +211,11 @@ def auth_setup(body: dict, response: Response):
     if password != confirm:
         raise HTTPException(400, "Las contraseñas no coinciden")
 
-    save_config({"username": username, "password_hash": hash_password(password)})
-    token = _new_token()
-    response.set_cookie(cfg_ini.SESSION_COOKIE_NAME, token, httponly=True, samesite="strict",
-                        max_age=cfg_ini.SESSION_MAX_AGE_SECONDS)
+    # Dos setups simultáneos: solo el primero crea el usuario.
+    if not _credenciales.crearSiNoExiste({"username": username, "password_hash": hash_password(password)}):
+        raise HTTPException(403, "La aplicación ya está configurada")
+    _avisar("seguridad", avisos.textoConfiguracionInicial(_client_ip(request)), "configuracion-inicial")
+    _set_session_cookie(response, _new_token())
     return {"ok": True}
 
 
@@ -218,29 +233,34 @@ def auth_login(body: dict, response: Response, request: Request):
     password = body.get("password") or ""
 
     # Timing-safe comparison para evitar timing attacks
-    username_ok = secrets.compare_digest(username, cfg.get("username", ""))
-    password_ok = verify_password(password, cfg.get("password_hash", "")) if username_ok else False
+    username_ok = secrets.compare_digest(username.encode("utf-8"), cfg.get("username", "").encode("utf-8"))
+    # bcrypt se ejecuta siempre (con un hash de relleno si el usuario no
+    # coincide): si no, el tiempo de respuesta delata qué usuarios existen.
+    password_ok = verify_password(password, cfg.get("password_hash", "") if username_ok else _hash_relleno())
+    password_ok = password_ok and username_ok
 
     if not username_ok or not password_ok:
         _record_fail(ip)
+        if _is_locked(ip):
+            _avisar("seguridad", avisos.textoBloqueo(ip, LOCKOUT_MIN), f"bloqueo:{ip}")
         raise HTTPException(401, "Credenciales incorrectas")
 
     _clear_attempts(ip)
+    _avisar("seguridad", avisos.textoLogin(ip), f"login:{ip}")
     token = _new_token()  # Regenerar token en cada login (anti session-fixation)
-    response.set_cookie(cfg_ini.SESSION_COOKIE_NAME, token, httponly=True, samesite="strict",
-                        max_age=cfg_ini.SESSION_MAX_AGE_SECONDS)
+    _set_session_cookie(response, token)
     return {"ok": True}
 
 
 @app.post("/api/auth/logout")
 def auth_logout(response: Response):
-    _new_token()  # Invalida la sesión actual
+    _sesion.invalidar()  # Invalida la sesión actual, también tras reiniciar
     response.delete_cookie(cfg_ini.SESSION_COOKIE_NAME)
     return {"ok": True}
 
 
 @app.post("/api/auth/change-password")
-def change_password(body: dict, request: Request):
+def change_password(body: dict, request: Request, response: Response):
     cfg = load_config()
     if not cfg:
         raise HTTPException(503, "Sin configuración")
@@ -258,13 +278,16 @@ def change_password(body: dict, request: Request):
 
     cfg["password_hash"] = hash_password(new_pass)
     save_config(cfg)
+    _avisar("seguridad", avisos.textoCambioPassword(_client_ip(request)), "cambio-password")
+    # Token nuevo: si alguien había robado la cookie anterior, deja de valer.
+    _set_session_cookie(response, _new_token())
     return {"ok": True}
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 def get_docker():
     try:
-        return docker.from_env()
+        return dockerProveedor.obtener()
     except Exception as e:
         raise HTTPException(status_code=503, detail=f"Docker no disponible: {e}")
 
@@ -277,55 +300,74 @@ def get_container(client, container_id: str):
 
 
 def _ws_auth(websocket: WebSocket) -> bool:
+    # Origin primero: el exec da una shell en los contenedores y no debe poder
+    # abrirlo otra web aprovechando la cookie (Cross-Site WebSocket Hijacking).
+    if not seguridad.origenPermitido(websocket.headers.get("origin"), websocket.headers.get("host")):
+        return False
     cfg = load_config()
     if not cfg:
         return False
-    return websocket.cookies.get(cfg_ini.SESSION_COOKIE_NAME) == _get_token()
+    return _sesion_valida(websocket.cookies.get(cfg_ini.SESSION_COOKIE_NAME))
 
 
 # ── Uso de recursos por contenedor ────────────────────────────────────────────
 PROJECT_LABEL = "com.docker.compose.project"
 SERVICE_LABEL = "com.docker.compose.service"
+_HEALTH_MARKS = (("(healthy)", "healthy"), ("(unhealthy)", "unhealthy"), ("(health: starting)", "starting"))
 
 
-def _container_image_name(c) -> str:
-    """Nombre de imagen sin tocar c.image: falla (ImageNotFound) si la imagen ya se borró."""
-    a = c.attrs
-    name = (a.get("Config") or {}).get("Image") or ""
+def _container_image_name(raw: dict) -> str:
+    """Nombre de imagen; si se borró la etiqueta, Docker da el sha256 y se acorta."""
+    name = raw.get("Image") or ""
     if not name or name.startswith("sha256:"):
-        name = (a.get("Image") or "")[7:19]
+        name = (raw.get("ImageID") or "")[7:19]
     return name
 
 
-def _container_info(c) -> dict:
-    a = c.attrs
-    labels = (a.get("Config") or {}).get("Labels") or {}
-    ports = {}
-    for k, v in ((a.get("NetworkSettings") or {}).get("Ports") or {}).items():
-        if v:
-            ports[k] = sorted({p["HostPort"] for p in v})
-    mounts = a.get("Mounts") or []
+def _container_health(status: str) -> str | None:
+    # El listado no trae State.Health; Docker lo añade al texto de Status.
+    for mark, health in _HEALTH_MARKS:
+        if mark in status:
+            return health
+    return None
+
+
+def _container_info(raw: dict) -> dict:
+    """Resumen de un contenedor a partir de una entrada de ``GET /containers/json``.
+
+    Se trabaja con el listado en bruto en vez de con ``containers.list()``,
+    que hace un ``inspect`` por contenedor (N+1 llamadas al daemon en cada
+    refresco de la interfaz).
+    """
+    labels = raw.get("Labels") or {}
+    ports: dict[str, set] = defaultdict(set)
+    for p in raw.get("Ports") or []:
+        if p.get("PublicPort"):
+            ports[f"{p['PrivatePort']}/{p.get('Type', 'tcp')}"].add(str(p["PublicPort"]))
+    names = raw.get("Names") or []
+    created = raw.get("Created")
     return {
-        "id": c.short_id,
-        "name": c.name,
-        "image": _container_image_name(c),
-        "image_id": (a.get("Image") or "").replace("sha256:", "")[:12],
-        "status": (a.get("State") or {}).get("Status", "unknown"),
-        "health": ((a.get("State") or {}).get("Health") or {}).get("Status"),
+        "id": raw["Id"][:12],
+        "name": names[0].lstrip("/") if names else raw["Id"][:12],
+        "image": _container_image_name(raw),
+        "image_id": (raw.get("ImageID") or "").replace("sha256:", "")[:12],
+        "status": raw.get("State") or "unknown",
+        "health": _container_health(raw.get("Status") or ""),
         "project": labels.get(PROJECT_LABEL),
         "service": labels.get(SERVICE_LABEL),
-        "created": (a.get("Created") or "")[:19].replace("T", " "),
-        "ports": ports,
-        "volumes": [m["Name"] for m in mounts if m.get("Type") == "volume" and m.get("Name")],
+        "created": datetime.fromtimestamp(created, timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+                   if isinstance(created, (int, float)) else "",
+        "ports": {k: sorted(v) for k, v in ports.items()},
+        "volumes": [m["Name"] for m in raw.get("Mounts") or [] if m.get("Type") == "volume" and m.get("Name")],
     }
 
 
 def _all_container_infos(client) -> list[dict]:
     infos = []
-    for c in client.containers.list(all=True):
+    for raw in client.api.containers(all=True):
         try:
-            infos.append(_container_info(c))
-        except Exception:
+            infos.append(_container_info(raw))
+        except (KeyError, TypeError, ValueError):
             continue  # un contenedor corrupto no debe tumbar todo el listado
     return infos
 
@@ -360,25 +402,53 @@ def project_action(project: str, op: str):
     return {"status": op, "containers": len(members)}
 
 
+_PORT_PROTOCOLS = {"tcp", "udp", "sctp"}
+_RESTART_POLICIES = {"no", "always", "unless-stopped", "on-failure"}
+
+
+def _parse_port(value: str) -> int:
+    if not value.isdigit() or not 1 <= int(value) <= 65535:
+        raise HTTPException(400, f"Puerto inválido: '{value}' (debe ser un número entre 1 y 65535)")
+    return int(value)
+
+
+def _parse_port_binding(spec: str) -> tuple[str, int] | None:
+    """Convierte ``"8080:80/tcp"`` en ``("80/tcp", 8080)``.
+
+    Raises:
+        HTTPException: 400 si el puerto o el protocolo no son válidos (antes un
+            puerto no numérico acababa en un 500 genérico).
+    """
+    parts = spec.split(":")
+    if len(parts) != 2:
+        return None
+    host_port, container_port = parts
+    proto = "tcp"
+    if "/" in container_port:
+        container_port, proto = container_port.split("/", 1)
+    if proto not in _PORT_PROTOCOLS:
+        raise HTTPException(400, f"Protocolo inválido: '{proto}' (tcp, udp o sctp)")
+    return f"{_parse_port(container_port)}/{proto}", _parse_port(host_port)
+
+
 @app.post("/api/containers/create")
 def create_container(body: dict):
     client = get_docker()
     image = (body.get("image") or "").strip()
     if not image or len(image) > 256:
         raise HTTPException(400, "Imagen inválida")
+    restart_policy = body.get("restart_policy", "no")
+    if restart_policy not in _RESTART_POLICIES:
+        raise HTTPException(400, "Política de reinicio inválida")
     try:
         port_bindings = {}
         for p in body.get("ports", [])[:20]:
             p = str(p).strip()
             if not p or len(p) > 30:
                 continue
-            parts = p.split(":")
-            if len(parts) == 2:
-                host_port, container_port = parts
-                proto = "tcp"
-                if "/" in container_port:
-                    container_port, proto = container_port.split("/")
-                port_bindings[f"{container_port}/{proto}"] = int(host_port)
+            binding = _parse_port_binding(p)
+            if binding:
+                port_bindings[binding[0]] = binding[1]
 
         volumes = {}
         for v in body.get("volumes", [])[:20]:
@@ -401,12 +471,14 @@ def create_container(body: dict):
             ports=port_bindings if port_bindings else None,
             environment=env if env else None,
             volumes=volumes if volumes else None,
-            restart_policy={"Name": body.get("restart_policy", "no")},
+            restart_policy={"Name": restart_policy},
             network=network,
             command=command,
             detach=True,
         )
         return {"status": "created", "id": c.short_id, "name": c.name}
+    except HTTPException:
+        raise
     except docker.errors.ImageNotFound:
         raise HTTPException(404, f"Imagen '{image}' no encontrada. Haz pull primero.")
     except Exception as e:
@@ -759,14 +831,25 @@ def system_info():
 
 @app.get("/api/system/host")
 def host_stats():
-    cpu  = psutil.cpu_percent(interval=0.3)
+    cpu  = servidor.lector.porcentaje_cpu_total()
     mem  = psutil.virtual_memory()
     disk = psutil.disk_usage("/")
     return {
         "cpu_pct": cpu, "mem_total": mem.total, "mem_used": mem.used, "mem_pct": mem.percent,
         "disk_total": disk.total, "disk_used": disk.used,
         "disk_pct": round(disk.used / disk.total * 100, 1),
+        "cpu_temp": servidor.lector.temperatura_cpu(),
+        "temp_warn": cfg_ini.servidorTempAviso, "temp_crit": cfg_ini.servidorTempCritica,
     }
+
+
+@app.get("/api/system/metrics")
+def host_metrics():
+    """Métricas detalladas del host para el panel «Servidor» (ver servidor.py)."""
+    try:
+        return servidor.lector.leer()
+    except OSError as e:
+        raise HTTPException(500, f"No se pudieron leer las métricas del servidor: {e}")
 
 
 @app.post("/api/system/prune")
@@ -789,6 +872,138 @@ def system_prune():
         raise HTTPException(500, str(e))
 
 
+# ── Limpieza selectiva ────────────────────────────────────────────────────────
+# Ver limpieza.py: imágenes y volúmenes que no usa ningún contenedor y tienen
+# cierta antigüedad. GET devuelve la vista previa; POST borra.
+def _cleanup_days(dias: int | None) -> int:
+    try:
+        return limpieza.validarDias(cfg_ini.CLEANUP_DEFAULT_DAYS if dias is None else dias,
+                                    cfg_ini.CLEANUP_MAX_DAYS)
+    except limpieza.LimpiezaInvalida as e:
+        raise HTTPException(400, str(e))
+
+
+@app.get("/api/limpieza")
+def cleanup_preview(dias: int | None = None):
+    try:
+        return limpieza.candidatos(get_docker(), _cleanup_days(dias))
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+
+@app.post("/api/limpieza")
+def cleanup_run(body: dict):
+    dias = body.get("dias")
+    if dias is not None and not isinstance(dias, int):
+        raise HTTPException(400, "'dias' debe ser un número entero")
+    tipos = body.get("tipos")
+    if not isinstance(tipos, list):
+        raise HTTPException(400, "'tipos' debe ser una lista")
+    try:
+        return {"status": "ok", **limpieza.limpiar(get_docker(), _cleanup_days(dias), set(tipos))}
+    except limpieza.LimpiezaInvalida as e:
+        raise HTTPException(400, str(e))
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+
+# ── Actualización ─────────────────────────────────────────────────────────────
+# El desplegable de la versión de la cabecera. Ver actualizacion.py: la app solo
+# comprueba y deja la petición; actualiza el vigilante del host.
+@app.get("/api/actualizacion")
+def update_status(refrescar: bool = False):
+    return {"ok": True, **actualizacion.estado(), "remota": actualizacion.version_remota(forzar=refrescar)}
+
+
+@app.post("/api/actualizacion")
+def update_request():
+    try:
+        return {"ok": True, **actualizacion.solicitar()}
+    except actualizacion.VigilanteAusente as e:
+        raise HTTPException(409, str(e))
+    except OSError as e:
+        raise HTTPException(500, f"No se pudo dejar la petición para el vigilante: {e}")
+
+
+# ── Telegram ──────────────────────────────────────────────────────────────────
+# Ver telegrama.py (conexión, lista blanca) y avisos.py (qué se avisa). Sin
+# TELEGRAM_BOT_TOKEN y TELEGRAM_IDS_PERMITIDOS en el entorno no arranca nada.
+_telegram: telegrama.ServicioTelegram | None = None
+_vigilancia: avisos.Vigilancia | None = None
+
+
+def _avisar(categoria: str, texto: str, clave: str | None = None) -> None:
+    """Encola un aviso por Telegram si está activado. Nunca bloquea ni lanza."""
+    if _telegram is not None:
+        _telegram.avisar(categoria, texto, clave)
+
+
+def _disco_pct() -> float:
+    return psutil.disk_usage(cfg_ini.servidorRutaDisco).percent
+
+
+def _iniciarTelegram() -> None:
+    """Construye el servicio de Telegram y los hilos de vigilancia de lo que esté activado."""
+    global _telegram, _vigilancia
+    comandos = avisos.crearComandos(__version__, lambda: _all_container_infos(dockerProveedor.obtener()), host_stats)
+    _telegram = telegrama.construir(cfg_ini.telegramToken, cfg_ini.telegramIdsPermitidos,
+                                    cfg_ini.telegramCategorias, comandos, cfg_ini.telegramTimeout)
+    if _telegram is None:
+        return
+    _telegram.iniciar()
+
+    _vigilancia = avisos.Vigilancia(_avisar, cfg_ini.telegramIntervalo)
+    # Solo se registra lo activado: VigilanteActualizaciones marca como avisado
+    # lo que ve, y con la categoría apagada se perdería el aviso al encenderla.
+    if _telegram.acepta("contenedores"):
+        _vigilancia.vigilarEventos(
+            lambda: docker.from_env().events(decode=True, filters={"type": "container"}),
+            avisos.ProcesadorEventosDocker(cfg_ini.telegramReiniciosBucle, cfg_ini.telegramVentanaBucleMinutos * 60),
+        )
+    if _telegram.acepta("recursos"):
+        _vigilancia.comprobarPeriodicamente("recursos", avisos.VigilanteRecursos(
+            servidor.lector.temperatura_cpu, _disco_pct, cfg_ini.servidorTempCritica, cfg_ini.telegramDiscoAviso,
+        ).comprobar)
+    if _telegram.acepta("actualizaciones"):
+        _vigilancia.comprobarPeriodicamente("actualizaciones", avisos.VigilanteActualizaciones(
+            actualizacion.version_remota, actualizacion.estado,
+            avisos.EstadoPersistente(os.path.join(DATA_DIR, "telegram.json")), __version__,
+        ).comprobar)
+    _vigilancia.iniciar()
+    _avisar("sistema", avisos.textoArranque(__version__, socket.gethostname()), "arranque")
+
+
+def _detenerTelegram() -> None:
+    if _vigilancia is not None:
+        _vigilancia.detener()
+    if _telegram is not None:
+        _telegram.detener()
+
+
+# ── Ajustes ───────────────────────────────────────────────────────────────────
+# Pantalla «Ajustes»: solo lectura de lo que hay en config.ini/.env (ver
+# ajustes.py) y la prueba de Telegram. Cambiar valores sigue siendo editar
+# esos archivos y reiniciar.
+@app.get("/api/ajustes")
+def settings_summary():
+    usuario = (load_config() or {}).get("username")
+    return {"ok": True, "version": __version__,
+            **ajustes.resumen(cfg_ini, usuario, _telegram is not None)}
+
+
+@app.post("/api/ajustes/telegram/prueba")
+def settings_telegram_test():
+    if _telegram is None:
+        raise HTTPException(409, "Telegram no está activo: revisa TELEGRAM_BOT_TOKEN y TELEGRAM_IDS_PERMITIDOS en el .env")
+    if not _telegram.enviarPrueba(ajustes.textoPrueba(__version__, socket.gethostname())):
+        raise HTTPException(429, "No se pudo encolar la prueba: hay demasiados avisos pendientes")
+    return {"ok": True}
+
+
 # ── WebSockets ────────────────────────────────────────────────────────────────
 @app.websocket("/ws/containers/{container_id}/logs")
 async def container_logs_ws(websocket: WebSocket, container_id: str):
@@ -801,7 +1016,9 @@ async def container_logs_ws(websocket: WebSocket, container_id: str):
     stop_event = threading.Event()
 
     def produce():
+        client = None
         try:
+            # Cliente propio: el seguimiento retiene la conexión mientras dure.
             client = docker.from_env()
             container = client.containers.get(container_id)
             # Logs históricos primero (timestamps, sin follow)
@@ -822,6 +1039,8 @@ async def container_logs_ws(websocket: WebSocket, container_id: str):
         except Exception as e:
             asyncio.run_coroutine_threadsafe(queue.put(f"\n[Error: {e}]\n"), loop)
         finally:
+            if client is not None:
+                client.close()
             asyncio.run_coroutine_threadsafe(queue.put(None), loop)
 
     threading.Thread(target=produce, daemon=True).start()
@@ -856,6 +1075,7 @@ async def container_stats_ws(websocket: WebSocket, container_id: str):
     stop_event = threading.Event()
 
     def produce():
+        client = None
         try:
             client = docker.from_env()
             for s in client.containers.get(container_id).stats(stream=True, decode=True):
@@ -868,6 +1088,8 @@ async def container_stats_ws(websocket: WebSocket, container_id: str):
         except Exception as e:
             asyncio.run_coroutine_threadsafe(queue.put(json.dumps({"error": str(e)})), loop)
         finally:
+            if client is not None:
+                client.close()
             asyncio.run_coroutine_threadsafe(queue.put(None), loop)
 
     threading.Thread(target=produce, daemon=True).start()
@@ -897,6 +1119,7 @@ async def container_exec_ws(websocket: WebSocket, container_id: str):
     exec_info: dict = {}
 
     def exec_thread():
+        client = None
         try:
             client = docker.from_env()
             container = client.containers.get(container_id)
@@ -935,6 +1158,8 @@ async def container_exec_ws(websocket: WebSocket, container_id: str):
                 out_queue.put(f"\r\n\x1b[31m[Error: {e}]\x1b[0m\r\n".encode()), loop
             )
         finally:
+            if client is not None:
+                client.close()
             asyncio.run_coroutine_threadsafe(out_queue.put(None), loop)
 
     threading.Thread(target=exec_thread, daemon=True).start()
@@ -987,4 +1212,7 @@ app.mount("/", StaticFiles(directory="static", html=True), name="static")
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host=cfg_ini.BIND_HOST, port=cfg_ini.PORT)
+    # proxy_headers=False: uvicorn reescribiría la IP del cliente con
+    # X-Forwarded-For en conexiones desde 127.0.0.1; de eso se encarga
+    # [security] trusted_proxies (ver seguridad.ipCliente) y solo ahí.
+    uvicorn.run(app, host=cfg_ini.BIND_HOST, port=cfg_ini.PORT, proxy_headers=False)

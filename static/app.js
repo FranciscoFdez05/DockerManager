@@ -49,13 +49,21 @@ function boot() {
   setInterval(loadContainers, 12000);
   setInterval(loadHostStats, 4000);
   loadHostStats();
+  // Al arrancar y no al abrir el desplegable: el punto de «hay versión nueva»
+  // tiene que salir sin que nadie vaya a mirar.
+  refreshUpdate();
+  setInterval(refreshUpdate, UPDATE_RECHECK_MS);
 
   q('pull-tag-input').addEventListener('keydown', e => { if (e.key === 'Enter') doPull(); });
   q('cp-new').addEventListener('keydown', e => { if (e.key === 'Enter') doChangePassword(); });
 }
 
 document.addEventListener('keydown', e => {
-  if (e.key === 'Escape') closeAllModals();
+  if (e.key === 'Escape') { closeAllModals(); closeVersionPopover(); }
+});
+
+document.addEventListener('click', e => {
+  if (!e.target.closest('#version-popover, #app-version-btn')) closeVersionPopover();
 });
 
 // ── Versión ────────────────────────────────────────────────────────────────
@@ -67,6 +75,284 @@ async function loadVersion() {
     if (!d.version) return;
     document.querySelectorAll('[data-app-version]').forEach(el => { el.textContent = `v${d.version}`; });
   } catch (_) {}
+}
+
+// ── Actualización ──────────────────────────────────────────────────────────
+// Desplegable de la versión de la cabecera. El botón no actualiza: deja una
+// petición que recoge el vigilante del host (tools/actualizador/), que es quien
+// ejecuta docker-update.sh. La app no puede hacerlo: recrearía su propio
+// contenedor y se mataría a mitad.
+const UPDATE_RECHECK_MS = 60 * 60 * 1000;
+const UPDATE_POLL_MS = 5000;
+const upd = { installed: null, published: null, hasNew: null, mine: null, poll: null, last: null };
+
+function toggleVersionPopover(e) {
+  e.stopPropagation();
+  const open = q('version-popover').classList.toggle('hidden') === false;
+  q('app-version-btn').setAttribute('aria-expanded', String(open));
+  if (open) refreshUpdate();
+}
+
+function closeVersionPopover() {
+  q('version-popover').classList.add('hidden');
+  q('app-version-btn').setAttribute('aria-expanded', 'false');
+}
+
+function updateMsg(text, type = '') {
+  // El mismo mensaje en el desplegable y en el modal: se puede comprobar desde los dos.
+  ['vp-msg', 'um-msg'].forEach(id => {
+    const el = q(id);
+    el.textContent = text;
+    el.className = `vp-msg ${type}`;
+  });
+}
+
+function paintRemote(r) {
+  const row = q('vp-remote-row'), tag = q('vp-tag');
+  upd.published = r && r.publicada || null;
+  upd.hasNew = r && r.hayNueva !== undefined ? r.hayNueva : null;
+
+  if (!r || !r.activo) { row.classList.add('hidden'); return; }
+  row.classList.remove('hidden');
+
+  if (!r.publicada) {
+    // Sin dato: se dice, en vez de un guion que se confunde con «al día».
+    q('vp-remote').textContent = 'no se pudo comprobar';
+    row.title = r.error || '';
+    tag.classList.add('hidden');
+    return;
+  }
+  q('vp-remote').textContent = r.publicada;
+  row.title = r.error ? `${r.error}. Último dato: ${new Date(r.comprobado).toLocaleString()}` : '';
+
+  if (upd.hasNew === null) { tag.classList.add('hidden'); return; }
+  tag.classList.remove('hidden');
+  tag.textContent = upd.hasNew ? 'Hay actualización' : 'Al día';
+  tag.classList.toggle('has-update', upd.hasNew);
+}
+
+function paintUpdate(d) {
+  upd.last = d;
+  upd.installed = d.version;
+  q('vp-version').textContent = d.version || '—';
+  paintRemote(d.remota);
+
+  const warning = q('vp-warning');
+  const failed = !d.enMarcha && d.ultimo && d.ultimo.estado === 'fallo';
+  if (!d.vigilanteVisto) {
+    warning.innerHTML = 'El vigilante de actualizaciones no da señales de vida. Instálalo una vez en el servidor con ' +
+      '<code>sudo ./tools/actualizador/instalar-vigilante.sh</code>; mientras tanto, actualiza por SSH con <code>./docker-update.sh</code>.';
+  } else if (failed) {
+    warning.textContent = `La última actualización falló${d.ultimo.codigo != null ? ` (código ${d.ultimo.codigo})` : ''}. ` +
+      'Sigue en marcha la versión anterior; el detalle está debajo.';
+  }
+  warning.classList.toggle('hidden', d.vigilanteVisto && !failed);
+
+  const detail = q('vp-detail');
+  const hasDetail = Boolean(d.ultimo && d.ultimo.detalle);
+  detail.classList.toggle('hidden', !hasDetail);
+  if (hasDetail) q('vp-detail-text').textContent = d.ultimo.detalle;
+
+  const btn = q('vp-update-btn');
+  btn.textContent = upd.hasNew && upd.published ? `Actualizar a la ${upd.published}` : 'Actualizar ahora';
+  btn.disabled = Boolean(d.enMarcha) || !d.vigilanteVisto;
+  q('vp-check-btn').disabled = Boolean(d.enMarcha);
+
+  const marker = q('app-version-btn');
+  marker.classList.toggle('has-update', upd.hasNew === true);
+  marker.title = upd.hasNew === true ? `Hay una versión nueva: la ${upd.published}` : 'Versión de DockerManager';
+
+  if (!q('update-modal').classList.contains('hidden')) paintUpdateModal(d);
+
+  if (d.enMarcha && !upd.poll) {
+    // Otra pestaña (o una recarga a mitad) pidió la actualización: se sigue igual.
+    upd.mine = d.solicitadaEn;
+    updateMsg('Actualizando… DockerManager se reiniciará');
+    startUpdatePoll();
+  }
+}
+
+async function fetchUpdate(force = false) {
+  const res = await fetch('/api/actualizacion' + (force ? '?refrescar=1' : ''));
+  if (!res.ok) throw new Error(await apiError(res));
+  return res.json();
+}
+
+async function refreshUpdate() {
+  try { paintUpdate(await fetchUpdate()); } catch (_) {}
+}
+
+async function checkUpdate() {
+  q('vp-check-btn').disabled = true;
+  q('um-check-btn').disabled = true;
+  updateMsg('Comprobando…');
+  try {
+    const d = await fetchUpdate(true);
+    paintUpdate(d);
+    const r = d.remota || {};
+    if (!r.activo) updateMsg('La comprobación de versión está desactivada en config.ini');
+    else if (r.error && !r.publicada) updateMsg(r.error, 'error');
+    else if (r.hayNueva) updateMsg(`Hay una versión nueva: la ${r.publicada}`, 'ok');
+    else if (r.hayNueva === false) updateMsg('Estás en la última versión publicada', 'ok');
+    else updateMsg('No se pudo comparar con la versión publicada');
+  } catch (err) {
+    updateMsg(`Error: ${err.message}`, 'error');
+  } finally {
+    q('vp-check-btn').disabled = Boolean(upd.poll);
+    q('um-check-btn').disabled = Boolean(upd.poll);
+  }
+}
+
+// «Actualizar» del desplegable no actualiza: abre el modal, que dice a qué
+// versión se va, qué trae y qué va a pasar, y es ahí donde se confirma.
+function requestUpdate() {
+  closeVersionPopover();
+  updateMsg('');
+  if (upd.last) paintUpdateModal(upd.last);
+  showModal('update-modal');
+  refreshUpdate();
+}
+
+// «hace un momento», «hace 5 min», «hace 3 h»: la caché de GitHub dura horas,
+// y saber de cuándo es el dato importa más que la hora exacta.
+function timeAgo(iso) {
+  const ms = Date.now() - new Date(iso).getTime();
+  if (!Number.isFinite(ms)) return '';
+  const min = Math.floor(ms / 60000);
+  if (min < 1) return 'hace un momento';
+  if (min < 60) return `hace ${min} min`;
+  const h = Math.floor(min / 60);
+  return h < 48 ? `hace ${h} h` : `hace ${Math.floor(h / 24)} días`;
+}
+
+// Markdown en línea del CHANGELOG (**negrita** y `código`). Se escapa antes:
+// el texto viene de GitHub y no se mete HTML ajeno en la página.
+function inlineMd(text) {
+  return esc(text)
+    .replace(/`([^`]+)`/g, '<code>$1</code>')
+    .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+}
+
+function renderReleaseNotes(r) {
+  const notes = r.novedades || [];
+  const title = notes.length > 1
+    ? `Novedades desde la ${esc(upd.installed)} (${notes.length} versiones)`
+    : 'Novedades';
+  if (!notes.length) {
+    const why = r.errorNovedades
+      ? `No se pudieron leer las notas de la versión: ${esc(r.errorNovedades)}`
+      : 'El CHANGELOG publicado no tiene notas para esta versión.';
+    return `<div class="um-notes-title">${title}</div><div class="um-notes-empty">${why}</div>`;
+  }
+  return `<div class="um-notes-title">${title}</div>` + notes.map(n => `
+    <div class="um-release">
+      <div class="um-release-head"><strong>${esc(n.version)}</strong>${n.fecha ? `<span>${esc(n.fecha)}</span>` : ''}</div>
+      ${n.grupos.map(g => `
+        ${g.titulo ? `<div class="um-group">${esc(g.titulo)}</div>` : ''}
+        <ul>${g.elementos.map(e => `<li>${inlineMd(e)}</li>`).join('')}</ul>`).join('')}
+    </div>`).join('');
+}
+
+function paintUpdateModal(d) {
+  const r = d.remota || {};
+  const tag = q('um-tag');
+  q('um-installed').textContent = d.version || '—';
+  q('um-published').textContent = r.publicada || (r.activo ? '?' : '—');
+  q('um-checked').textContent = r.comprobado ? `Comprobado ${timeAgo(r.comprobado)}` : '';
+
+  let status;
+  if (!r.activo) status = 'La comprobación de versión está desactivada en config.ini.';
+  else if (!r.publicada) status = r.error || 'No se pudo comprobar la versión publicada.';
+  else if (upd.hasNew) status = `Hay una versión nueva: la ${r.publicada}.`;
+  else if (upd.hasNew === false) status = 'Tienes la última versión publicada.';
+  else status = 'No se pudo comparar con la versión publicada.';
+  q('um-status-text').textContent = status;
+  tag.classList.toggle('hidden', upd.hasNew === null);
+  tag.textContent = upd.hasNew ? 'Hay actualización' : 'Al día';
+  tag.classList.toggle('has-update', upd.hasNew === true);
+
+  const notesEl = q('um-notes');
+  notesEl.classList.toggle('hidden', upd.hasNew !== true);
+  if (upd.hasNew === true) notesEl.innerHTML = renderReleaseNotes(r);
+
+  const restart = 'DockerManager se reiniciará: estará un par de ' +
+    'minutos sin responder. Si la versión nueva no arranca, el servidor vuelve solo a la anterior.';
+  q('um-explain').textContent = upd.hasNew === false
+    ? `Ya estás en la última publicada (${d.version}): se volverá a construir la misma versión, sin novedades. ${restart}`
+    : restart;
+
+  // El aviso (vigilante ausente, último fallo) es el mismo que el del desplegable.
+  const warning = q('um-warning'), vpWarning = q('vp-warning');
+  warning.innerHTML = vpWarning.innerHTML;
+  warning.classList.toggle('hidden', vpWarning.classList.contains('hidden'));
+
+  const btn = q('um-update-btn');
+  btn.textContent = upd.hasNew && r.publicada ? `Actualizar a la ${r.publicada}`
+    : upd.hasNew === false ? 'Reinstalar igualmente' : 'Actualizar ahora';
+  btn.disabled = Boolean(d.enMarcha) || !d.vigilanteVisto;
+  q('um-check-btn').disabled = Boolean(d.enMarcha) || Boolean(upd.poll);
+}
+
+async function confirmUpdate() {
+  q('um-update-btn').disabled = true;
+  q('vp-update-btn').disabled = true;
+  try {
+    const res = await fetch('/api/actualizacion', { method: 'POST' });
+    if (!res.ok) throw new Error(await apiError(res));
+    const d = await res.json();
+    paintUpdate(d);
+    if (!d.aceptada) { updateMsg('Ya hay una actualización en marcha'); return; }
+    upd.mine = d.solicitadaEn;
+    updateMsg('Petición enviada. Esperando al vigilante del servidor…');
+    startUpdatePoll();
+  } catch (err) {
+    updateMsg(`Error: ${err.message}`, 'error');
+    refreshUpdate();
+  }
+}
+
+function stopUpdatePoll() {
+  clearInterval(upd.poll);
+  upd.poll = null;
+}
+
+function startUpdatePoll() {
+  stopUpdatePoll();
+  const before = upd.installed;
+  upd.poll = setInterval(async () => {
+    let d;
+    try {
+      const res = await fetch('/api/actualizacion');
+      if (res.status === 401) { location.reload(); return; }
+      d = await res.json();
+    } catch (_) {
+      // Mientras se recrea el contenedor no responde nadie: es la señal de que va en serio.
+      updateMsg('Reiniciando… esperando a que vuelva');
+      return;
+    }
+
+    const mine = d.ultimo && d.ultimo.solicitadaEn === upd.mine;
+    if (d.version && before && d.version !== before) {
+      stopUpdatePoll();
+      updateMsg(`Actualizado a la ${d.version}. Recargando…`, 'ok');
+      setTimeout(() => location.reload(), 2000);
+    } else if (mine && d.ultimo.estado === 'ok') {
+      stopUpdatePoll();
+      updateMsg('Actualización terminada. Recargando…', 'ok');
+      setTimeout(() => location.reload(), 2000);
+    } else if (mine && d.ultimo.estado === 'fallo') {
+      stopUpdatePoll();
+      paintUpdate(d);
+      updateMsg('La actualización falló; sigue la versión anterior', 'error');
+    } else if (!d.enMarcha) {
+      stopUpdatePoll();
+      paintUpdate(d);
+      updateMsg('Nadie recogió la petición a tiempo. ¿Está en marcha el vigilante?', 'error');
+    } else {
+      paintUpdate(d);
+      updateMsg('Actualizando… DockerManager se reiniciará');
+    }
+  }, UPDATE_POLL_MS);
 }
 
 // ── Auth ───────────────────────────────────────────────────────────────────
@@ -85,7 +371,7 @@ async function checkAuth() {
       return false;
     }
     q('logout-btn').classList.remove('hidden');
-    q('chpass-btn').classList.remove('hidden');
+    q('settings-btn').classList.remove('hidden');
     return true;
   } catch (_) {
     return true;
@@ -113,7 +399,7 @@ async function doSetup() {
     }
     closeAllModals();
     q('logout-btn').classList.remove('hidden');
-    q('chpass-btn').classList.remove('hidden');
+    q('settings-btn').classList.remove('hidden');
     toast(`Cuenta creada. Bienvenido, ${username}`, 'success');
     boot();
   } catch (err) {
@@ -144,7 +430,7 @@ async function doLogin() {
     }
     closeAllModals();
     q('logout-btn').classList.remove('hidden');
-    q('chpass-btn').classList.remove('hidden');
+    q('settings-btn').classList.remove('hidden');
     boot();
   } catch (err) {
     errEl.textContent = err.message;
@@ -191,6 +477,299 @@ async function doChangePassword() {
     errEl.textContent = err.message;
     errEl.classList.remove('hidden');
   }
+}
+
+// ── Ajustes ────────────────────────────────────────────────────────────────
+// Solo lectura de /api/ajustes (config.ini y .env) con las acciones que ya
+// había sueltas por la cabecera. Cada sección es una función que devuelve las
+// tarjetas, así añadir una es añadir una entrada a SETTINGS_SECTIONS.
+const SETTINGS_KEY = 'dm-settings-section';
+const settingsState = { data: null, section: null };
+
+const ST_ICONS = {
+  user: '<circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/>',
+  lock: '<rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/>',
+  send: '<path d="M22 2 11 13"/><path d="M22 2 15 22l-4-9-9-4 20-7z"/>',
+  bell: '<path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/>',
+  tag: '<path d="M20.6 13.4 13.4 20.6a2 2 0 0 1-2.8 0L3 13V3h10l7.6 7.6a2 2 0 0 1 0 2.8z"/><path d="M7.5 7.5h.01"/>',
+  git: '<circle cx="6" cy="6" r="2.5"/><circle cx="6" cy="18" r="2.5"/><circle cx="18" cy="8" r="2.5"/><path d="M6 8.5v7M18 10.5c0 4-6 3-11 5.5"/>',
+  server: '<rect x="2" y="3" width="20" height="8" rx="2"/><rect x="2" y="13" width="20" height="8" rx="2"/><path d="M6 7h.01M6 17h.01"/>',
+  temp: '<path d="M14 14.76V3.5a2.5 2.5 0 0 0-5 0v11.26a4.5 4.5 0 1 0 5 0z"/>',
+  trash: '<path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6M10 11v5M14 11v5"/>',
+};
+
+const SETTINGS_SECTIONS = {
+  cuenta: { title: 'Cuenta y seguridad', render: settingsAccount },
+  avisos: { title: 'Avisos', render: settingsAlerts },
+  actualizaciones: { title: 'Actualizaciones', render: settingsUpdates },
+  servidor: { title: 'Servidor y limpieza', render: settingsServer },
+};
+
+const TELEGRAM_STATUS = {
+  activo: ['ok', 'Listo.', 'Los avisos se envían por Telegram.'],
+  sin_configurar: ['', 'Sin configurar.', 'Define TELEGRAM_BOT_TOKEN y TELEGRAM_IDS_PERMITIDOS en el .env y reinicia.'],
+  incompleto: ['warn', 'Incompleto.', 'Falta una de las dos variables del .env; sin las dos, Telegram no arranca.'],
+  error: ['err', 'No arrancó.', 'Las variables están, pero algún valor no es válido. El motivo exacto está en el log de la app.'],
+};
+
+function savedSettingsSection() {
+  try {
+    const s = localStorage.getItem(SETTINGS_KEY);
+    return s in SETTINGS_SECTIONS ? s : 'cuenta';
+  } catch (_) { return 'cuenta'; }
+}
+
+async function openSettings() {
+  showModal('settings-modal');
+  showSettingsSection(settingsState.section || savedSettingsSection());
+  await loadSettings();
+  // El estado de la versión lo guarda el desplegable de la cabecera (upd);
+  // se refresca para que la sección Actualizaciones no enseñe uno viejo.
+  await refreshUpdate();
+  renderSettings();
+}
+
+async function loadSettings() {
+  const errEl = q('st-error');
+  errEl.classList.add('hidden');
+  try {
+    const res = await fetch('/api/ajustes');
+    if (!res.ok) throw new Error(await apiError(res));
+    settingsState.data = await res.json();
+  } catch (err) {
+    errEl.textContent = `No se pudieron cargar los ajustes: ${err.message}`;
+    errEl.classList.remove('hidden');
+  }
+  renderSettings();
+}
+
+function showSettingsSection(key) {
+  settingsState.section = key;
+  try { localStorage.setItem(SETTINGS_KEY, key); } catch (_) {}
+  document.querySelectorAll('#settings-modal .st-nav-item').forEach(b => {
+    const on = b.dataset.section === key;
+    b.classList.toggle('active', on);
+    if (on) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current');
+  });
+  q('st-heading').textContent = SETTINGS_SECTIONS[key].title;
+  renderSettings();
+}
+
+function renderSettings() {
+  const body = q('st-body');
+  const d = settingsState.data;
+  if (!d) { body.innerHTML = '<p class="st-loading">Cargando…</p>'; return; }
+  body.innerHTML = SETTINGS_SECTIONS[settingsState.section].render(d).join('');
+}
+
+// ── Ajustes: piezas ────────────────────────────────────────────────────────
+// Todo valor que viene del servidor pasa por esc(); los textos fijos no.
+function stCard({ icon, title, desc, source, body }) {
+  return `<section class="st-card">
+    <div class="st-card-head">
+      <span class="st-card-icon"><svg viewBox="0 0 24 24" aria-hidden="true">${ST_ICONS[icon]}</svg></span>
+      <div><h3 class="st-card-title">${title}</h3>${desc ? `<p class="st-card-desc">${desc}</p>` : ''}</div>
+      ${source ? `<span class="st-source">${source}</span>` : ''}
+    </div>
+    <div class="st-card-body">${body}</div>
+  </section>`;
+}
+
+function stRow(title, sub, right = '') {
+  return `<div class="st-row">
+    <div class="st-row-main"><div class="st-row-title">${title}</div>${sub ? `<div class="st-row-sub">${sub}</div>` : ''}</div>
+    ${right}
+  </div>`;
+}
+
+function stValue(v) { return `<span class="st-row-value">${esc(v)}</span>`; }
+function stList(rows) { return `<div class="st-list">${rows.join('')}</div>`; }
+function stPill(text, level = '') { return `<span class="st-pill ${level}">${text}</span>`; }
+function stYesNo(v) { return v ? 'sí' : 'no'; }
+
+function stStep(n, done, title, sub, right = '') {
+  const mark = `<span class="st-step ${done ? 'done' : ''}" aria-label="${done ? 'Hecho' : 'Pendiente'}">${done ? '&#x2713;' : n}</span>`;
+  return `<div class="st-row">${mark}
+    <div class="st-row-main"><div class="st-row-title">${title}</div><div class="st-row-sub">${sub}</div></div>
+    ${right}
+  </div>`;
+}
+
+// ── Ajustes: secciones ─────────────────────────────────────────────────────
+function settingsAccount(d) {
+  const c = d.cuenta;
+  return [
+    stCard({
+      icon: 'user', title: 'Cuenta',
+      desc: 'Administrador único de DockerManager. El usuario se elige en el primer arranque y no se puede cambiar desde aquí.',
+      source: 'data/config.json',
+      body: stList([
+        stRow('Usuario', null, stValue(c.usuario || '—')),
+        stRow('Contraseña', 'Se guarda como hash bcrypt. Al cambiarla se avisa por Telegram si la categoría «seguridad» está activa.',
+          '<button type="button" onclick="openChangePassword()">Cambiar contraseña</button>'),
+      ]),
+    }),
+    stCard({
+      icon: 'lock', title: 'Sesión y acceso',
+      desc: 'Duración de la sesión y bloqueo por intentos fallidos de login.',
+      source: 'config.ini › [security]',
+      body: stList([
+        stRow('Duración de la sesión', 'Pasado este tiempo hay que volver a entrar.', stValue(`${c.sesionDias} días`)),
+        stRow('Intentos antes de bloquear', 'Logins fallidos seguidos desde la misma IP.', stValue(c.intentosMaximos)),
+        stRow('Tiempo de bloqueo', null, stValue(`${c.bloqueoMinutos} min`)),
+        stRow('Coste bcrypt', 'Solo afecta a las contraseñas que se guarden a partir de ahora.', stValue(c.costeBcrypt)),
+      ]),
+    }),
+  ];
+}
+
+function settingsAlerts(d) {
+  const t = d.telegram;
+  const [level, label, text] = TELEGRAM_STATUS[t.estado] || ['', esc(t.estado), ''];
+  const active = t.estado === 'activo';
+  const idsSub = t.errorIds ? `<span class="st-pill err">${esc(t.errorIds)}</span>`
+    : t.ids.length ? `Reciben avisos y pueden usar comandos: ${t.ids.map(i => `<code>${esc(i)}</code>`).join(', ')}.`
+    : 'Consigue tu ID con <a href="https://t.me/userinfobot" target="_blank" rel="noopener noreferrer">@userinfobot</a> y ponlo en <code>TELEGRAM_IDS_PERMITIDOS</code>.';
+
+  const connection = stCard({
+    icon: 'send', title: 'Telegram',
+    desc: 'Bot para recibir avisos en el móvil y consultar el estado con comandos de solo lectura. Qué avisos llegan se elige en la tarjeta de al lado.',
+    source: '.env',
+    body: `
+      <div class="st-status"><span class="st-dot ${level}"></span><span><b>${label}</b> ${text}</span></div>
+      ${stList([
+        stStep(1, t.tokenConfigurado, 'Token del bot',
+          t.tokenConfigurado ? `${stPill('Configurado', 'ok')} El valor no se muestra nunca aquí.`
+            : 'Crea un bot con <a href="https://t.me/BotFather" target="_blank" rel="noopener noreferrer">@BotFather</a> y pon el token en <code>TELEGRAM_BOT_TOKEN</code>.'),
+        stStep(2, t.ids.length > 0, 'IDs autorizados', idsSub),
+        stStep(3, false, 'Abrir el chat con el bot',
+          'Abre el chat con tu bot y pulsa <b>Iniciar</b>. Un bot no puede escribir primero a nadie: sin este paso los avisos no llegan. Si otra persona le escribe, lo ignora.'),
+        stStep(4, false, 'Comprobar', 'Manda un mensaje de prueba a los IDs autorizados, sin depender de las categorías activas.',
+          `<button id="st-tg-test" type="button" onclick="sendTelegramTest()" ${active ? '' : 'disabled'}>Enviar prueba</button>`),
+      ])}`,
+  });
+
+  const categories = stCard({
+    icon: 'bell', title: 'Qué se avisa',
+    desc: 'Categorías activas y umbrales de los avisos.',
+    source: 'config.ini › [telegram]',
+    body: `
+      ${t.errorCategorias ? `<div class="st-help err">${esc(t.errorCategorias)}</div>` : ''}
+      ${stList(t.categorias.map(c => stRow(esc(c.id), esc(c.descripcion), c.activa ? stPill('Activa', 'ok') : stPill('Apagada'))))}
+      ${stList([
+        stRow('Disco lleno', 'Porcentaje de uso a partir del que se avisa.', stValue(`${t.discoAvisoPct} %`)),
+        stRow('Bucle de reinicios', 'Caídas de un mismo contenedor dentro de la ventana.',
+          stValue(`${t.reiniciosBucle} en ${t.ventanaBucleMinutos} min`)),
+        stRow('Comprobación de recursos', 'Cada cuánto se miran temperatura, disco y versión nueva.', stValue(`${t.intervaloSegundos} s`)),
+        stRow('Timeout de la API', null, stValue(`${t.timeoutSegundos} s`)),
+      ])}`,
+  });
+  return [connection, categories];
+}
+
+function settingsUpdates(d) {
+  const a = d.actualizacion;
+  const u = upd.last;
+  let tag = stPill('Sin comprobar');
+  if (!a.comprobar) tag = stPill('Comprobación desactivada');
+  else if (upd.hasNew === true) tag = stPill('Hay actualización', 'warn');
+  else if (upd.hasNew === false) tag = stPill('Al día', 'ok');
+
+  const watcher = !u ? stValue('—')
+    : u.vigilanteVisto ? stPill('Activo', 'ok') : stPill('No da señales', 'err');
+
+  return [
+    stCard({
+      icon: 'tag', title: 'Versión',
+      desc: 'La app solo comprueba y deja la petición; quien actualiza es el vigilante instalado en el host.',
+      body: `
+        ${stList([
+          stRow('Instalada', null, stValue(d.version)),
+          stRow('Publicada', `En la rama <code>${esc(a.rama)}</code> de GitHub.`, `${tag} ${stValue(upd.published || '—')}`),
+          stRow('Vigilante del host', u && !u.vigilanteVisto
+            ? 'Instálalo una vez con <code>sudo ./tools/actualizador/instalar-vigilante.sh</code>.' : null, watcher),
+        ])}
+        <div class="st-actions">
+          <button id="st-upd-check" type="button" onclick="settingsCheckUpdate()" ${a.comprobar ? '' : 'disabled'}>Comprobar ahora</button>
+          <button type="button" class="btn-accent" onclick="requestUpdate()">Actualizar…</button>
+        </div>`,
+    }),
+    stCard({
+      icon: 'git', title: 'Origen',
+      desc: 'De dónde se lee la versión publicada.',
+      source: 'config.ini › [actualizacion]',
+      body: stList([
+        stRow('Comprobar versiones', null, stValue(stYesNo(a.comprobar))),
+        stRow('Repositorio', null, stValue(a.repositorio)),
+        stRow('Rama', null, stValue(a.rama)),
+        stRow('Caché de la respuesta', '«Comprobar ahora» se la salta.', stValue(`${a.cacheHoras} h`)),
+        stRow('Timeout', null, stValue(`${a.timeoutSegundos} s`)),
+      ]),
+    }),
+  ];
+}
+
+function settingsServer(d) {
+  const s = d.servidor, l = d.limpieza;
+  const exposed = s.bindHost === '0.0.0.0';
+  return [
+    stCard({
+      icon: 'server', title: 'Servidor web',
+      desc: 'Dónde escucha DockerManager. Las variables PORT y HOST del entorno tienen prioridad sobre config.ini.',
+      source: 'config.ini › [server]',
+      body: stList([
+        stRow('Puerto', null, stValue(s.puerto)),
+        stRow('Dirección', exposed ? 'Accesible desde cualquier interfaz de red.' : null, stValue(s.bindHost)),
+      ]),
+    }),
+    stCard({
+      icon: 'temp', title: 'Panel Servidor',
+      desc: 'Umbrales de color de la temperatura cuando el sensor no publica los suyos. La crítica también dispara el aviso de recursos.',
+      source: 'config.ini › [servidor]',
+      body: stList([
+        stRow('Temperatura de aviso', null, stValue(`${s.temperaturaAviso} °C`)),
+        stRow('Temperatura crítica', null, stValue(`${s.temperaturaCritica} °C`)),
+        stRow('Ruta medida como disco', null, stValue(s.rutaDisco)),
+      ]),
+    }),
+    stCard({
+      icon: 'trash', title: 'Limpieza',
+      desc: 'Imágenes y volúmenes que no usa ningún contenedor, ni siquiera uno parado.',
+      source: 'config.ini › [limpieza]',
+      body: `
+        ${stList([
+          stRow('Antigüedad propuesta', 'Valor inicial de la ventana «Limpiar». 0 = cualquier antigüedad.', stValue(`${l.diasPorDefecto} días`)),
+          stRow('Antigüedad máxima', null, stValue(`${l.diasMaximos} días`)),
+        ])}
+        <div class="st-actions"><button type="button" onclick="settingsOpenCleanup()">Abrir Limpiar</button></div>`,
+    }),
+  ];
+}
+
+// ── Ajustes: acciones ──────────────────────────────────────────────────────
+async function sendTelegramTest() {
+  const btn = q('st-tg-test');
+  btn.disabled = true;
+  try {
+    const res = await fetch('/api/ajustes/telegram/prueba', { method: 'POST' });
+    if (!res.ok) throw new Error(await apiError(res));
+    toast('Prueba enviada: debería llegar en unos segundos', 'success');
+  } catch (err) {
+    toast(`Telegram: ${err.message}`, 'error');
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function settingsCheckUpdate() {
+  q('st-upd-check').disabled = true;
+  await checkUpdate();
+  renderSettings();
+}
+
+function settingsOpenCleanup() {
+  closeModal('settings-modal');
+  openCleanup();
 }
 
 // ── Notifications ──────────────────────────────────────────────────────────
@@ -300,7 +879,10 @@ async function loadHostStats() {
     q('host-stats-bar').innerHTML =
       `<span class="hstat">CPU <b>${d.cpu_pct.toFixed(1)}%</b></span>` +
       `<span class="hstat">RAM <b>${d.mem_pct.toFixed(1)}%</b> <small>${fmtBytes(d.mem_used)}/${fmtBytes(d.mem_total)}</small></span>` +
-      `<span class="hstat">Disco <b>${d.disk_pct}%</b> <small>${fmtBytes(d.disk_used)}/${fmtBytes(d.disk_total)}</small></span>`;
+      `<span class="hstat">Disco <b>${d.disk_pct}%</b> <small>${fmtBytes(d.disk_used)}/${fmtBytes(d.disk_total)}</small></span>` +
+      (d.cpu_temp != null
+        ? `<span class="hstat">Temp <b class="${levelOf(d.cpu_temp, d.temp_warn, d.temp_crit)}">${d.cpu_temp.toFixed(0)}°C</b></span>`
+        : '');
   } catch (_) {}
 }
 
@@ -1143,6 +1725,171 @@ async function openSystemInfo() {
   }
 }
 
+// ── Servidor ───────────────────────────────────────────────────────────────
+// Métricas del host (/api/system/metrics). Solo se consultan con el modal
+// abierto: el resto del tiempo basta con la barra de la cabecera.
+const SERVER_REFRESH_MS = 3000;
+const SERVER_PCT_WARN = 70;
+const SERVER_PCT_CRIT = 90;
+const serverState = { timer: null, chart: null, buf: { labels: [], cpu: [], mem: [], temp: [] } };
+
+function openServer() {
+  closeServer();
+  serverState.buf = { labels: [], cpu: [], mem: [], temp: [] };
+  q('srv-cards').innerHTML = '<p class="dim">Cargando...</p>';
+  ['srv-cores', 'srv-temps', 'srv-mem', 'srv-sys'].forEach(id => { q(id).innerHTML = ''; });
+  q('srv-updated').textContent = '';
+  showModal('server-modal');
+  initServerChart();
+  serverState.timer = setInterval(loadServerMetrics, SERVER_REFRESH_MS);
+  loadServerMetrics();
+}
+
+function closeServer() {
+  if (serverState.timer) { clearInterval(serverState.timer); serverState.timer = null; }
+  if (serverState.chart) { serverState.chart.destroy(); serverState.chart = null; }
+}
+
+async function loadServerMetrics() {
+  try {
+    const res = await fetch('/api/system/metrics');
+    if (!res.ok) throw new Error(await apiError(res));
+    const d = await res.json();
+    // La respuesta puede llegar después de cerrar el modal.
+    if (!serverState.timer) return;
+    renderServer(d);
+    pushServerChart(d);
+    q('srv-updated').textContent = 'Actualizado ' + clockTime();
+  } catch (err) {
+    q('srv-updated').textContent = 'Error: ' + err.message;
+  }
+}
+
+function levelOf(val, warn, crit) {
+  if (val == null) return '';
+  return val >= crit ? 'crit' : val >= warn ? 'warn' : '';
+}
+
+function srvBar(pct, level) {
+  const cls = level === 'crit' ? 'bar-danger' : level === 'warn' ? 'bar-warn' : 'bar-cpu';
+  return `<div class="bar-wrap"><div class="bar ${cls}" style="width:${Math.min(100, Math.max(0, pct))}%"></div></div>`;
+}
+
+function srvCard(label, value, sub, level = '') {
+  return `<div class="sum-card srv-card ${level}"><div class="sum-val">${value}</div>` +
+    `<div class="sum-label">${label}</div><div class="sum-sub">${sub}</div></div>`;
+}
+
+function renderServer(d) {
+  const { cpu, memory: mem, swap, disk } = d;
+  const temp = d.cpu_temp;
+  const load = cpu.load_avg;
+  const cores = cpu.cores_logical || 1;
+  const freq = cpu.freq_mhz ? ` · ${cpu.freq_mhz} MHz` : '';
+  q('srv-cards').innerHTML =
+    srvCard('CPU', `${cpu.pct.toFixed(1)}<small>%</small>`, `${plural(cores, 'núcleo', 'núcleos')}${freq}`,
+      levelOf(cpu.pct, SERVER_PCT_WARN, SERVER_PCT_CRIT)) +
+    // Carga por encima del número de núcleos = hay procesos esperando CPU.
+    srvCard('Carga', load ? load[0].toFixed(2) : '—', load ? `5m ${load[1].toFixed(2)} · 15m ${load[2].toFixed(2)}` : 'no disponible',
+      load ? levelOf(load[0] / cores * 100, SERVER_PCT_WARN, 100) : '') +
+    srvCard('RAM', `${mem.pct.toFixed(1)}<small>%</small>`, `${fmtBytes(mem.used)} / ${fmtBytes(mem.total)}`,
+      levelOf(mem.pct, SERVER_PCT_WARN, SERVER_PCT_CRIT)) +
+    srvCard('Swap', swap.total ? `${swap.pct.toFixed(1)}<small>%</small>` : '—',
+      swap.total ? `${fmtBytes(swap.used)} / ${fmtBytes(swap.total)}` : 'sin swap',
+      swap.total ? levelOf(swap.pct, SERVER_PCT_WARN, SERVER_PCT_CRIT) : '') +
+    srvCard('Disco', `${disk.pct.toFixed(1)}<small>%</small>`, `${fmtBytes(disk.used)} / ${fmtBytes(disk.total)}`,
+      levelOf(disk.pct, SERVER_PCT_WARN, SERVER_PCT_CRIT)) +
+    srvCard('Temp. CPU', temp != null ? `${temp.toFixed(0)}<small>°C</small>` : '—',
+      temp != null ? 'sensor más caliente' : 'sin sensor de CPU',
+      levelOf(temp, d.thresholds.temp_warn, d.thresholds.temp_crit)) +
+    srvCard('Encendido', fmtUptime(d.uptime_seconds), 'desde ' + new Date(d.boot_time).toLocaleString('es'));
+
+  q('srv-cores').innerHTML = cpu.per_core.map((pct, i) =>
+    `<div class="srv-row"><span class="srv-row-k">#${i}</span>` +
+    `${srvBar(pct, levelOf(pct, SERVER_PCT_WARN, SERVER_PCT_CRIT))}<span class="srv-row-v">${pct.toFixed(0)}%</span></div>`
+  ).join('');
+
+  q('srv-temps').innerHTML = d.temperatures.length
+    ? d.temperatures.map(t =>
+        `<div class="srv-row" title="${esc(t.sensor)} · aviso ${t.high}°C · crítica ${t.critical}°C">` +
+        `<span class="srv-row-k">${esc(t.label)}</span>` +
+        `${srvBar(t.current / t.critical * 100, levelOf(t.current, t.high, t.critical))}` +
+        `<span class="srv-row-v">${t.current.toFixed(1)}°C</span></div>`).join('') +
+      d.fans.map(f => kv(f.label, `${f.rpm} RPM`)).join('')
+    : '<p class="dim">El hardware no publica sensores de temperatura (habitual en máquinas virtuales).</p>';
+
+  q('srv-mem').innerHTML =
+    kv('Total', fmtBytes(mem.total)) + kv('En uso', fmtBytes(mem.used)) +
+    kv('Disponible', fmtBytes(mem.available)) +
+    (mem.cached != null ? kv('Caché', fmtBytes(mem.cached)) : '') +
+    (mem.buffers != null ? kv('Buffers', fmtBytes(mem.buffers)) : '') +
+    kv('Swap', swap.total ? `${fmtBytes(swap.used)} / ${fmtBytes(swap.total)}` : 'sin swap');
+
+  q('srv-sys').innerHTML =
+    kv('Disco medido', disk.path) + kv('Libre', fmtBytes(disk.free)) +
+    kv('Lectura', fmtRate(disk.read_bps)) + kv('Escritura', fmtRate(disk.write_bps)) +
+    kv('Núcleos', `${cores} lógicos${cpu.cores_physical ? ` · ${cpu.cores_physical} físicos` : ''}`) +
+    (cpu.freq_mhz ? kv('Frecuencia', `${cpu.freq_mhz} MHz${cpu.freq_max_mhz ? ` (máx. ${cpu.freq_max_mhz})` : ''}`) : '') +
+    (load ? kv('Carga 1/5/15', load.map(v => v.toFixed(2)).join(' · ')) : '');
+}
+
+function initServerChart() {
+  const b = serverState.buf;
+  const line = (label, data, color, fill) => ({
+    label, data, borderColor: color, backgroundColor: fill, fill: true,
+    tension: 0.4, pointRadius: 0, borderWidth: 2, spanGaps: true,
+  });
+  serverState.chart = new Chart(q('srv-chart').getContext('2d'), {
+    type: 'line',
+    data: {
+      labels: b.labels,
+      datasets: [
+        line('CPU %', b.cpu, '#58a6ff', 'rgba(88,166,255,0.08)'),
+        line('RAM %', b.mem, '#3fb950', 'rgba(63,185,80,0.08)'),
+        line('Temp. CPU °C', b.temp, '#f85149', 'rgba(248,81,73,0.05)'),
+      ],
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      animation: { duration: 0 },
+      interaction: { mode: 'index', intersect: false },
+      scales: {
+        x: { display: false },
+        // Porcentajes y grados comparten eje: las temperaturas de trabajo
+        // caen dentro de 0-100 y así no hace falta un segundo eje.
+        y: { min: 0, max: 100, ticks: { color: '#8b949e', font: { size: 11 } }, grid: { color: '#21262d' } },
+      },
+      plugins: {
+        legend: { labels: { color: '#8b949e', font: { size: 11 }, boxWidth: 12 } },
+        tooltip: {
+          backgroundColor: '#161b22', borderColor: '#30363d', borderWidth: 1,
+          titleColor: '#8b949e', bodyColor: '#c9d1d9',
+        },
+      },
+    },
+  });
+}
+
+function pushServerChart(d) {
+  const b = serverState.buf;
+  b.labels.push(clockTime()); b.cpu.push(d.cpu.pct); b.mem.push(d.memory.pct); b.temp.push(d.cpu_temp);
+  if (b.labels.length > MAX_CHART_PTS) { b.labels.shift(); b.cpu.shift(); b.mem.shift(); b.temp.shift(); }
+  if (serverState.chart) serverState.chart.update('none');
+}
+
+function clockTime() {
+  return new Date().toLocaleTimeString('es', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+}
+
+function fmtRate(bps) { return bps == null ? '—' : fmtBytes(bps) + '/s'; }
+
+function fmtUptime(secs) {
+  const days = Math.floor(secs / 86400);
+  const hours = Math.floor(secs % 86400 / 3600);
+  const mins = Math.floor(secs % 3600 / 60);
+  return days ? `${days}<small>d</small> ${hours}<small>h</small>` : `${hours}<small>h</small> ${mins}<small>m</small>`;
+}
+
 // ── Prune ──────────────────────────────────────────────────────────────────
 async function confirmPrune() {
   if (!confirm('¿Eliminar contenedores parados, imágenes sin usar, volúmenes y redes huérfanas?')) return;
@@ -1154,6 +1901,90 @@ async function confirmPrune() {
     setTimeout(loadAll, 800);
   } catch (err) {
     toast(`Error: ${err.message}`, 'error');
+  }
+}
+
+// ── Limpieza selectiva ─────────────────────────────────────────────────────
+// Vista previa de imágenes y volúmenes en desuso con cierta antigüedad. El
+// servidor recalcula la lista al borrar, así que lo mostrado es orientativo.
+let cleanupData = null;
+
+async function openCleanup() {
+  cleanupData = null;
+  q('cleanup-days').value = '';
+  showModal('cleanup-modal');
+  await loadCleanup();
+}
+
+async function loadCleanup() {
+  const days = q('cleanup-days').value.trim();
+  q('cleanup-list').innerHTML = '<span class="dim">Buscando...</span>';
+  q('cleanup-run-btn').disabled = true;
+  try {
+    const res = await fetch('/api/limpieza' + (days ? `?dias=${encodeURIComponent(days)}` : ''));
+    const d = await res.json();
+    if (!res.ok) throw new Error(d.detail || JSON.stringify(d));
+    cleanupData = d;
+    q('cleanup-days').value = d.dias;
+    renderCleanup();
+  } catch (err) {
+    cleanupData = null;
+    q('cleanup-list').innerHTML = `<span style="color:var(--red)">Error: ${esc(err.message)}</span>`;
+  }
+}
+
+function cleanupTypes() {
+  const types = [];
+  if (q('cleanup-images').checked) types.push('imagenes');
+  if (q('cleanup-volumes').checked) types.push('volumenes');
+  return types;
+}
+
+function renderCleanup() {
+  if (!cleanupData) return;
+  const types = cleanupTypes();
+  const imgs = types.includes('imagenes') ? cleanupData.imagenes : [];
+  const vols = types.includes('volumenes') ? cleanupData.volumenes : [];
+  const mb = imgs.reduce((t, i) => t + i.size_mb, 0).toFixed(1);
+  const imgRows = imgs.map(i => `<tr>
+    <td>${i.tags.length ? i.tags.map(t => `<span class="port-tag">${esc(t)}</span>`).join(' ') : '<span class="dim">sin tag</span>'}</td>
+    <td><span class="mono dim">${esc(i.id)}</span></td><td>${i.size_mb} MB</td><td>${esc(i.created)}</td></tr>`).join('');
+  const volRows = vols.map(v => `<tr>
+    <td><span class="mono">${esc(v.name)}</span></td>
+    <td><span class="dim">${esc(v.driver)}</span></td><td>—</td><td>${esc(v.created)}</td></tr>`).join('');
+  q('cleanup-list').innerHTML = (imgs.length || vols.length)
+    ? `<p class="dim" style="font-size:12px;margin:8px 0">${plural(imgs.length, 'imagen', 'imágenes')} (${mb} MB) · ${plural(vols.length, 'volumen', 'volúmenes')}</p>
+       <div class="table-wrapper"><table><tbody>${imgRows}${volRows}</tbody></table></div>`
+    : '<p class="dim" style="margin-top:8px">Nada que limpiar con estos filtros.</p>';
+  q('cleanup-run-btn').disabled = !(imgs.length || vols.length);
+}
+
+async function runCleanup() {
+  const types = cleanupTypes();
+  if (!cleanupData || !types.length) return;
+  const warn = types.includes('volumenes') ? ' Los datos de los volúmenes se perderán de forma permanente.' : '';
+  if (!confirm(`¿Borrar los recursos listados?${warn}`)) return;
+  q('cleanup-run-btn').disabled = true;
+  try {
+    const res = await fetch('/api/limpieza', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ dias: cleanupData.dias, tipos: types }),
+    });
+    const d = await res.json();
+    if (!res.ok) throw new Error(d.detail || JSON.stringify(d));
+    const msg = `Limpieza: ${plural(d.images_deleted.length, 'imagen', 'imágenes')}, ` +
+      `${plural(d.volumes_deleted.length, 'volumen', 'volúmenes')} · ${d.freed_mb} MB`;
+    if (d.errors.length) {
+      toast(`${msg} · ${d.errors.length} no se pudieron borrar: ${d.errors.map(e => e.item).join(', ')}`, 'error');
+    } else {
+      toast(msg, 'success');
+    }
+    setTimeout(loadAll, 600);
+    await loadCleanup();
+  } catch (err) {
+    toast(`Error: ${err.message}`, 'error');
+    q('cleanup-run-btn').disabled = false;
   }
 }
 
@@ -1195,11 +2026,13 @@ function closeModal(id) {
   if (id === 'log-modal') { if (logWs) { logWs.close(); logWs = null; } }
   if (id === 'term-modal') closeTerminal();
   if (id === 'proc-modal') currentProcId = null;
+  if (id === 'server-modal') closeServer();
 }
 
 function closeAllModals() {
   ['setup-modal','login-modal','log-modal','stats-modal','inspect-modal','proc-modal',
-   'sysinfo-modal','pull-modal','term-modal','create-modal','history-modal','chpass-modal']
+   'sysinfo-modal','server-modal','pull-modal','term-modal','create-modal','history-modal','chpass-modal','cleanup-modal',
+   'update-modal','settings-modal']
     .forEach(id => q(id).classList.add('hidden'));
   if (statsWs) { statsWs.close(); statsWs = null; }
   if (statsChart) { statsChart.destroy(); statsChart = null; }
@@ -1208,6 +2041,7 @@ function closeAllModals() {
   if (term) { term.dispose(); term = null; }
   if (termResizeObserver) { termResizeObserver.disconnect(); termResizeObserver = null; }
   currentProcId = null;
+  closeServer();
 }
 
 // ── UI helpers ─────────────────────────────────────────────────────────────

@@ -33,7 +33,7 @@ python3 -c "import venv" 2>/dev/null || {
 # Copiar archivos
 echo "Instalando archivos en $APP_DIR..."
 sudo mkdir -p "$APP_DIR/static"
-sudo cp main.py config.py requirements.txt "$APP_DIR/"
+sudo cp main.py config.py version.py actualizacion.py limpieza.py servidor.py telegrama.py avisos.py ajustes.py seguridad.py clienteDocker.py requirements.txt "$APP_DIR/"
 [ -f "$APP_DIR/config.ini" ] || sudo cp config.ini "$APP_DIR/"
 sudo cp static/index.html static/style.css static/app.js "$APP_DIR/static/"
 sudo chown -R "$CURRENT_USER:$CURRENT_USER" "$APP_DIR"

@@ -7,3 +7,8 @@ venv
 README.md
 install.sh
 docker-update.sh
+data
+tools
+.venv
+.pytest_cache
+tests

@@ -158,6 +158,25 @@ if [ -z "$(awk -F= '/^SECRET_KEY=/{print $2; exit}' .env)" ]; then
     aviso "El .env no tiene SECRET_KEY. Ejecuta ./docker-up.sh una vez para generarla."
 fi
 
+# Usuario del contenedor (sin root): mismo criterio que docker-up.sh. Se
+# reescribe en cada actualización por si cambió el grupo del socket de Docker
+# o el .env es de una versión anterior que no los tenía.
+DOCKER_SOCK=/var/run/docker.sock
+fijar_env() {
+    if grep -q "^$1=" .env; then
+        sed "s|^$1=.*|$1=$2|" .env > .env.tmp && mv .env.tmp .env
+    else
+        printf '%s=%s\n' "$1" "$2" >> .env
+    fi
+}
+if [ ! -S "$DOCKER_SOCK" ]; then
+    error "No encuentro el socket de Docker en $DOCKER_SOCK."
+    exit 1
+fi
+fijar_env DM_UID "$(id -u)"
+fijar_env DM_GID "$(id -g)"
+fijar_env DOCKER_GID "$(stat -c %g "$DOCKER_SOCK")"
+
 # La etiqueta de la imagen sale de la versión: dockermanager:1.0.0
 if [ "$VERSION_NUEVA" != "desconocida" ]; then
     DOCKERMANAGER_VERSION="$VERSION_NUEVA"
@@ -165,6 +184,10 @@ else
     DOCKERMANAGER_VERSION="latest"
 fi
 export DOCKERMANAGER_VERSION
+
+# Buzón del vigilante de actualizaciones. Se crea aquí, como tu usuario: si no
+# existe, Docker lo crea como root al montarlo y el vigilante no podría escribir.
+mkdir -p data/actualizacion
 
 # ── 4. Construir y levantar ───────────────────────────────────────────────────
 paso "Construyendo la imagen $DOCKERMANAGER_VERSION"

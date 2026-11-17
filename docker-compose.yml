@@ -1,4 +1,22 @@
 services:
+  # Paso previo de un solo uso: deja /data y el buzón en propiedad del usuario
+  # sin privilegios con el que corre la app. Hace falta porque las
+  # instalaciones anteriores escribían ahí como root. Solo tiene la capability
+  # CHOWN y termina en cuanto acaba.
+  dockermanager-permisos:
+    build: .
+    image: dockermanager:${DOCKERMANAGER_VERSION:-latest}
+    user: "0:0"
+    entrypoint: ["chown", "-R", "${DM_UID:-0}:${DM_GID:-0}", "/data", "/actualizacion"]
+    cap_drop: [ALL]
+    cap_add: [CHOWN]
+    security_opt: ["no-new-privileges:true"]
+    network_mode: none
+    restart: "no"
+    volumes:
+      - dockermanager-data:/data
+      - ./data/actualizacion:/actualizacion
+
   dockermanager:
     build: .
     # Cada versión queda etiquetada (dockermanager:1.0.0): docker-update.sh
@@ -6,6 +24,29 @@ services:
     image: dockermanager:${DOCKERMANAGER_VERSION:-latest}
     container_name: dockermanager
     restart: unless-stopped
+    depends_on:
+      dockermanager-permisos:
+        condition: service_completed_successfully
+    # Sin root: el UID/GID de quien ejecuta docker-up.sh (así puede escribir en
+    # ./data/actualizacion) y el grupo dueño del socket para hablar con Docker.
+    # Ojo: acceso al socket sigue equivaliendo a root en el host; esto limita
+    # lo que puede hacer un fallo en la app fuera de la API de Docker.
+    # Sin esas variables en el .env (la primera actualización desde una versión
+    # anterior la hace el docker-update.sh viejo, que no las escribe) se cae a
+    # root, como antes, en vez de romper el compose y el rollback. La siguiente
+    # ejecución de docker-up.sh o docker-update.sh las rellena.
+    user: "${DM_UID:-0}:${DM_GID:-0}"
+    group_add:
+      - "${DOCKER_GID:-0}"
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop: [ALL]
+    # Solo surte efecto en el modo root de compatibilidad: sin ella root no
+    # podría escribir en ./data/actualizacion, que es de tu usuario. A un
+    # usuario no root las capabilities añadidas aquí no le dan nada.
+    cap_add: [DAC_OVERRIDE]
+    security_opt: ["no-new-privileges:true"]
     ports:
       # 0.0.0.0 = publicado en todas las interfaces -> accesible desde
       # cualquier equipo de la LAN. ${PORT} lo exporta docker-up.sh a
@@ -15,13 +56,21 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
       - dockermanager-data:/data
       - ./config.ini:/app/config.ini:ro
+      # Buzón con el vigilante de actualizaciones del host (tools/actualizador/):
+      # la app deja aquí la petición del botón «Actualizar» y el vigilante, que
+      # corre fuera del contenedor, ejecuta docker-update.sh y deja el resultado.
+      - ./data/actualizacion:/actualizacion
     environment:
       - DATA_DIR=/data
+      - ACTUALIZACION_DIR=/actualizacion
       # Mismo puerto dentro del contenedor que el publicado fuera.
       - PORT=${PORT:-3000}
       # Generada por docker-up.sh en el .env. Mantiene viva la sesion
       # entre reinicios del contenedor.
       - SECRET_KEY=${SECRET_KEY:-}
+      # Avisos por Telegram (opcional). Vacías = desactivado. Ver .env.example.
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-}
+      - TELEGRAM_IDS_PERMITIDOS=${TELEGRAM_IDS_PERMITIDOS:-}
 
 volumes:
   dockermanager-data:

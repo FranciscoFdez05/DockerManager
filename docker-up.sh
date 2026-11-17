@@ -48,6 +48,23 @@ if [ -z "$CURRENT_KEY" ]; then
     echo "SECRET_KEY generada automaticamente."
 fi
 
+# ── 1b. Usuario del contenedor ──────────────────────────────────────────────
+# La app corre sin root (docker-compose.yml): con tu UID/GID, para escribir en
+# data/actualizacion, y con el grupo dueño del socket, para hablar con Docker.
+# Se guardan en el .env para que tambien funcione `docker compose ...` a mano.
+DOCKER_SOCK=/var/run/docker.sock
+fijar_env() {
+    if grep -q "^$1=" .env; then
+        sed "s|^$1=.*|$1=$2|" .env > .env.tmp && mv .env.tmp .env
+    else
+        printf '%s=%s\n' "$1" "$2" >> .env
+    fi
+}
+[ -S "$DOCKER_SOCK" ] || { echo "ERROR: no encuentro el socket de Docker en $DOCKER_SOCK" >&2; exit 1; }
+fijar_env DM_UID "$(id -u)"
+fijar_env DM_GID "$(id -g)"
+fijar_env DOCKER_GID "$(stat -c %g "$DOCKER_SOCK")"
+
 # ── 2. Puerto desde config.ini ──────────────────────────────────────────────
 # Recorre el .ini quedandose con [server] port. Ignora comentarios (; o #).
 PORT=$(awk -F= '
@@ -72,6 +89,10 @@ export PORT
 DOCKERMANAGER_VERSION=$(sed -n 's/^__version__ = "\(.*\)"/\1/p' version.py | head -n 1)
 [ -n "$DOCKERMANAGER_VERSION" ] || DOCKERMANAGER_VERSION=latest
 export DOCKERMANAGER_VERSION
+
+# Buzón del vigilante de actualizaciones. Se crea aquí, como tu usuario: si no
+# existe, Docker lo crea como root al montarlo y el vigilante no podría escribir.
+mkdir -p data/actualizacion
 
 # ── 3. Arranque ─────────────────────────────────────────────────────────────
 docker compose up -d --build "$@"
