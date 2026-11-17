@@ -93,6 +93,7 @@
           <button id="vp-update-btn" class="vp-primary" type="button" onclick="requestUpdate()">Actualizar ahora</button>
           <button id="vp-check-btn" class="vp-secondary" type="button" onclick="checkUpdate()">Comprobar versiones</button>
         </div>
+        <div id="vp-progress" class="upd-progress compact hidden" aria-live="polite"></div>
         <div id="vp-msg" class="vp-msg"></div>
         <details id="vp-detail" class="vp-detail hidden">
           <summary>Salida de la última actualización</summary>
@@ -461,6 +462,7 @@
         <div id="um-notes" class="um-notes hidden"></div>
         <div id="um-warning" class="vp-warning hidden"></div>
         <p id="um-explain" class="um-explain"></p>
+        <div id="um-progress" class="upd-progress hidden" aria-live="polite"></div>
         <div id="um-msg" class="vp-msg"></div>
         <div class="um-actions">
           <button type="button" onclick="closeModal('update-modal')">Cerrar</button>

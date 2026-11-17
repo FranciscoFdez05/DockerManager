@@ -76,8 +76,22 @@ aviso()  { printf '\n\033[33m%s\033[0m\n' "$*"; }
 error()  { printf '\n\033[31m%s\033[0m\n' "$*" >&2; }
 paso()   { printf '\n\033[36m── %s\033[0m\n' "$*"; }
 
+# Progreso para la ventana de actualización de la web. El vigilante pasa en
+# DM_PROGRESO la ruta del JSON; ejecutado a mano no está definida y no se
+# escribe nada. Temporal + rename para que la app no lea un JSON a medias, y
+# nunca hace fallar la actualización: es informativo.
+PASOS_TOTAL=5
+progreso() {
+    [ -n "$DM_PROGRESO" ] || return 0
+    titulo=$(printf '%s' "$2" | tr -d '"\\\000-\037')
+    { printf '{"paso":%s,"total":%s,"titulo":"%s","actualizadoEn":"%s"}\n' \
+        "$1" "$PASOS_TOTAL" "$titulo" "$(date +%Y-%m-%dT%H:%M:%S)" > "$DM_PROGRESO.tmp" \
+        && mv -f "$DM_PROGRESO.tmp" "$DM_PROGRESO"; } 2>/dev/null || true
+}
+
 # ── 1. Comprobaciones previas ─────────────────────────────────────────────────
 paso "Comprobando el estado local"
+progreso 1 "Comprobando el estado local"
 
 if [ ! -f .env ]; then
     error "No hay .env. Esto es una instalación nueva: usa ./docker-up.sh."
@@ -119,6 +133,7 @@ echo "Versión instalada: $VERSION_ANTERIOR"
 # ── 2. Traer los cambios ──────────────────────────────────────────────────────
 if [ "$SIN_PULL" -eq 0 ]; then
     paso "Descargando la versión nueva"
+    progreso 2 "Descargando la versión nueva"
     git pull --ff-only
 fi
 
@@ -191,9 +206,11 @@ mkdir -p data/actualizacion
 
 # ── 4. Construir y levantar ───────────────────────────────────────────────────
 paso "Construyendo la imagen $DOCKERMANAGER_VERSION"
+progreso 3 "Construyendo la imagen $DOCKERMANAGER_VERSION"
 docker compose build
 
 paso "Levantando"
+progreso 4 "Reiniciando con la versión nueva"
 docker compose up -d
 
 # ── 5. Comprobar que arranca de verdad ────────────────────────────────────────
@@ -202,6 +219,7 @@ docker compose up -d
 # Se consulta desde dentro del contenedor: no hace falta curl en el host ni
 # depende del puerto publicado ni del firewall.
 paso "Esperando a que responda (hasta ${ESPERA_SALUD}s)"
+progreso 5 "Comprobando que la versión nueva responde"
 
 salud() {
     docker compose exec -T "$SERVICIO" python -c \
@@ -245,6 +263,7 @@ if [ "$VERSION_ANTERIOR" != "desconocida" ] \
    && [ "$VERSION_ANTERIOR" != "$VERSION_NUEVA" ] \
    && docker image inspect "${IMAGEN}:${VERSION_ANTERIOR}" >/dev/null 2>&1; then
     paso "Levantando de nuevo la $VERSION_ANTERIOR"
+    progreso 5 "Volviendo a la $VERSION_ANTERIOR"
     DOCKERMANAGER_VERSION="$VERSION_ANTERIOR" docker compose up -d --no-build
     aviso "Se ha vuelto a la $VERSION_ANTERIOR. El código del repositorio SÍ está actualizado:
 para dejarlo también como estaba, ejecuta  git checkout v${VERSION_ANTERIOR}"

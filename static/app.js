@@ -84,7 +84,85 @@ async function loadVersion() {
 // contenedor y se mataría a mitad.
 const UPDATE_RECHECK_MS = 60 * 60 * 1000;
 const UPDATE_POLL_MS = 5000;
-const upd = { installed: null, published: null, hasNew: null, mine: null, poll: null, last: null };
+const upd = { installed: null, published: null, hasNew: null, mine: null, poll: null, last: null, progress: null };
+
+// Pasos de docker-update.sh, en el mismo orden que sus llamadas a `progreso`.
+// El título del paso en curso lo manda el servidor (lleva la versión); estos
+// son para pintar la lista completa. Si el script cambia el total, se pinta
+// solo el paso en curso en vez de una lista que no casa.
+const UPDATE_STEPS = [
+  'Comprobar el estado local',
+  'Descargar la versión nueva',
+  'Construir la imagen',
+  'Reiniciar con la versión nueva',
+  'Comprobar que responde',
+];
+// Paso en el que DockerManager deja de responder: docker compose up recrea su contenedor.
+const UPDATE_RESTART_STEP = 4;
+
+// upd.progress: { phase, paso, total, titulo }.
+// phase: wait (pedida, sin recoger), run, restart (sin respuesta), ok, fail.
+function setUpdateProgress(next) {
+  upd.progress = next ? { ...upd.progress, ...next } : null;
+  paintUpdateProgress();
+}
+
+function progressPercent(p) {
+  if (p.phase === 'ok') return 100;
+  if (p.phase === 'wait' || !p.paso) return 3;
+  // El paso en curso cuenta como medio hecho: la barra se mueve al empezarlo.
+  return Math.round(((p.paso - 0.5) / p.total) * 100);
+}
+
+function progressHeadline(p) {
+  if (p.phase === 'wait') return 'Petición enviada: esperando a que el servidor empiece';
+  if (p.phase === 'ok') return 'Actualización terminada';
+  if (p.phase === 'fail') {
+    return p.paso ? `Falló en el paso ${p.paso} de ${p.total} · ${UPDATE_STEPS[p.paso - 1] || p.titulo || ''}`
+      : 'La actualización falló antes de empezar';
+  }
+  if (p.phase === 'restart') return `Paso ${p.paso} de ${p.total} · Reiniciando: DockerManager no responde mientras tanto`;
+  if (!p.paso) return 'Actualizando…';
+  return `Paso ${p.paso} de ${p.total} · ${p.titulo || UPDATE_STEPS[p.paso - 1] || ''}`;
+}
+
+function renderUpdateSteps(p) {
+  if (!p.total || p.total !== UPDATE_STEPS.length) return '';
+  return `<ol class="upd-steps">${UPDATE_STEPS.map((label, i) => {
+    const n = i + 1;
+    let cls = '';
+    if (p.phase === 'ok' || (p.paso && n < p.paso)) cls = 'done';
+    else if (n === p.paso) cls = p.phase === 'fail' ? 'failed' : 'active';
+    return `<li class="${cls}">${esc(label)}</li>`;
+  }).join('')}</ol>`;
+}
+
+function paintUpdateProgress() {
+  const p = upd.progress;
+  ['vp-progress', 'um-progress'].forEach(id => {
+    const el = q(id);
+    el.classList.toggle('hidden', !p);
+    if (!p) { el.innerHTML = ''; return; }
+    const pct = progressPercent(p);
+    el.dataset.phase = p.phase;
+    // El desplegable es estrecho: barra y paso en curso; la lista va en el modal.
+    el.innerHTML = `
+      <div class="upd-bar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${pct}"
+           aria-label="Progreso de la actualización"><span style="width:${pct}%"></span></div>
+      <div class="upd-head">${esc(progressHeadline(p))}</div>
+      ${el.classList.contains('compact') ? '' : renderUpdateSteps(p)}`;
+  });
+}
+
+// Traduce el estado del servidor mientras dura la actualización.
+function progressFromStatus(d) {
+  const pr = d.progreso;
+  if (pr) setUpdateProgress({ phase: 'run', paso: pr.paso, total: pr.total, titulo: pr.titulo });
+  else if (!upd.progress || !['run', 'restart'].includes(upd.progress.phase)) {
+    // Sin progreso: aún sin recoger, o un docker-update.sh anterior que no lo escribe.
+    setUpdateProgress({ phase: 'wait', paso: 0, total: UPDATE_STEPS.length, titulo: '' });
+  }
+}
 
 function toggleVersionPopover(e) {
   e.stopPropagation();
@@ -163,6 +241,8 @@ function paintUpdate(d) {
   marker.title = upd.hasNew === true ? `Hay una versión nueva: la ${upd.published}` : 'Versión de DockerManager';
 
   if (!q('update-modal').classList.contains('hidden')) paintUpdateModal(d);
+
+  if (d.enMarcha) progressFromStatus(d);
 
   if (d.enMarcha && !upd.poll) {
     // Otra pestaña (o una recarga a mitad) pidió la actualización: se sigue igual.
@@ -300,6 +380,8 @@ async function confirmUpdate() {
     const res = await fetch('/api/actualizacion', { method: 'POST' });
     if (!res.ok) throw new Error(await apiError(res));
     const d = await res.json();
+    // Lo que quedase de una actualización anterior (un fallo) no se mezcla con esta.
+    if (d.aceptada) setUpdateProgress(null);
     paintUpdate(d);
     if (!d.aceptada) { updateMsg('Ya hay una actualización en marcha'); return; }
     upd.mine = d.solicitadaEn;
@@ -327,6 +409,10 @@ function startUpdatePoll() {
       d = await res.json();
     } catch (_) {
       // Mientras se recrea el contenedor no responde nadie: es la señal de que va en serio.
+      // Ocurre en el paso de reinicio aunque no se llegara a ver su progreso.
+      const p = upd.progress || {};
+      setUpdateProgress({ phase: 'restart', total: p.total || UPDATE_STEPS.length,
+        paso: Math.max(p.paso || 0, UPDATE_RESTART_STEP), titulo: '' });
       updateMsg('Reiniciando… esperando a que vuelva');
       return;
     }
@@ -334,18 +420,22 @@ function startUpdatePoll() {
     const mine = d.ultimo && d.ultimo.solicitadaEn === upd.mine;
     if (d.version && before && d.version !== before) {
       stopUpdatePoll();
+      setUpdateProgress({ phase: 'ok' });
       updateMsg(`Actualizado a la ${d.version}. Recargando…`, 'ok');
       setTimeout(() => location.reload(), 2000);
     } else if (mine && d.ultimo.estado === 'ok') {
       stopUpdatePoll();
+      setUpdateProgress({ phase: 'ok' });
       updateMsg('Actualización terminada. Recargando…', 'ok');
       setTimeout(() => location.reload(), 2000);
     } else if (mine && d.ultimo.estado === 'fallo') {
       stopUpdatePoll();
+      if (upd.progress) setUpdateProgress({ phase: 'fail' });
       paintUpdate(d);
       updateMsg('La actualización falló; sigue la versión anterior', 'error');
     } else if (!d.enMarcha) {
       stopUpdatePoll();
+      setUpdateProgress(null);
       paintUpdate(d);
       updateMsg('Nadie recogió la petición a tiempo. ¿Está en marcha el vigilante?', 'error');
     } else {

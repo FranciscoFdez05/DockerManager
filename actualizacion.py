@@ -16,6 +16,8 @@ Ficheros del directorio compartido:
   solicitada.json  lo escribe la app al pulsar «Actualizar»; el vigilante lo
                    borra antes de empezar.
   estado.json      lo escribe el vigilante: en_marcha, ok o fallo.
+  progreso.json    lo escribe docker-update.sh en cada paso (número, total y
+                   título); el vigilante lo borra al empezar.
   latido           el vigilante lo toca en cada pasada (cada 30 s): si no se
                    ha tocado hace rato, el vigilante no está instalado.
 """
@@ -35,6 +37,7 @@ from version import __version__
 
 SOLICITADA = "solicitada.json"
 ESTADO = "estado.json"
+PROGRESO = "progreso.json"
 LATIDO = "latido"
 
 # Una petición que nadie recoge en este tiempo se da por perdida: el botón no
@@ -349,6 +352,27 @@ def _segundos_desde(iso):
         return None
 
 
+def _leer_progreso() -> dict | None:
+    """Paso en curso de docker-update.sh, validado.
+
+    El fichero lo escribe un script de shell en el host: se comprueba la forma
+    antes de pasarlo a la web en vez de confiar en él.
+
+    Returns:
+        {"paso", "total", "titulo", "actualizadoEn"} o None si no hay progreso
+        o el fichero no tiene la forma esperada.
+    """
+    datos = _leer_json(PROGRESO)
+    if not datos:
+        return None
+    paso, total, titulo = datos.get("paso"), datos.get("total"), datos.get("titulo")
+    if not isinstance(paso, int) or not isinstance(total, int) or not isinstance(titulo, str):
+        return None
+    if total < 1 or not 1 <= paso <= total:
+        return None
+    return {"paso": paso, "total": total, "titulo": titulo[:120], "actualizadoEn": datos.get("actualizadoEn")}
+
+
 def estado() -> dict:
     """Si hay una actualización en marcha, si el vigilante vive y cómo acabó la última."""
     solicitud = _leer_json(SOLICITADA)
@@ -380,6 +404,8 @@ def estado() -> dict:
         "version": __version__,
         "enMarcha": en_marcha,
         "solicitadaEn": solicitada_en if en_marcha else None,
+        # Solo mientras dura: al acabar, el resultado lo cuenta «ultimo».
+        "progreso": _leer_progreso() if en_marcha else None,
         "vigilanteVisto": vigilante_visto,
         "ultimo": ultimo,
     }

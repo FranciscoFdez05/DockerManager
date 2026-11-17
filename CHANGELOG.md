@@ -3,6 +3,11 @@
 El formato sigue [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/).
 `docker-update.sh` imprime la primera sección al actualizar.
 
+## [Sin publicar]
+
+### Añadido
+- Barra de progreso y lista de pasos al actualizar desde la web, en el desplegable de la versión y en la ventana **Actualizar DockerManager**: comprobar, descargar, construir la imagen, reiniciar y comprobar que responde. Si falla, marca en qué paso. `docker-update.sh` escribe el paso en curso en `data/actualizacion/progreso.json` solo cuando lo lanza el vigilante (`DM_PROGRESO`); a mano no cambia nada. `GET /api/actualizacion` lo devuelve en `progreso` mientras dura.
+
 ## [1.2.0] - 2026-11-17
 
 ### Añadido

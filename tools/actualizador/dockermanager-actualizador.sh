@@ -18,6 +18,7 @@ cd "$(dirname "$0")/../.."   # tools/actualizador/ -> raíz del repo
 
 BUZON="data/actualizacion"
 SOLICITADA="$BUZON/solicitada.json"
+PROGRESO="$BUZON/progreso.json"
 CERROJO="$BUZON/.cerrojo"
 
 # Texto -> cadena JSON: sin colores ANSI ni caracteres de control, con las
@@ -61,6 +62,8 @@ main() {
     # Se consume ANTES de actualizar: si se va la luz a mitad, al volver no se
     # relanza sola.
     rm -f "$SOLICITADA"
+    # El progreso de una actualización anterior no puede pasar por el de esta.
+    rm -f "$PROGRESO"
 
     escribir_estado en_marcha null ""
 
@@ -70,7 +73,8 @@ main() {
     fi
 
     codigo=0
-    salida=$(./docker-update.sh 2>&1) || codigo=$?
+    # Ruta absoluta: docker-update.sh se reejecuta desde una copia en /tmp.
+    salida=$(DM_PROGRESO="$(pwd)/$PROGRESO" ./docker-update.sh 2>&1) || codigo=$?
 
     # Es para el desplegable, no un log: bastan las últimas líneas. El log entero
     # queda en journalctl -u dockermanager-actualizador.

@@ -640,6 +640,46 @@ th.col-actions, td.col-actions { width: 110px; white-space: nowrap; }
   background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius); padding: 8px;
 }
 
+/* ── Progreso de la actualización (desplegable y modal) ── */
+.upd-progress { display: flex; flex-direction: column; gap: 8px; }
+.upd-bar {
+  position: relative; height: 8px; overflow: hidden;
+  background: var(--surface2); border: 1px solid var(--border); border-radius: 999px;
+}
+.upd-bar span {
+  display: block; height: 100%; border-radius: inherit;
+  background: var(--primary); transition: width .6s ease;
+}
+/* Rayas en movimiento mientras trabaja: entre paso y paso la barra no se mueve
+   (construir la imagen tarda minutos) y así no parece colgada. */
+.upd-progress[data-phase="run"] .upd-bar span,
+.upd-progress[data-phase="wait"] .upd-bar span,
+.upd-progress[data-phase="restart"] .upd-bar span {
+  background-image: linear-gradient(45deg, rgba(255,255,255,.18) 25%, transparent 25%, transparent 50%,
+    rgba(255,255,255,.18) 50%, rgba(255,255,255,.18) 75%, transparent 75%, transparent);
+  background-size: 16px 16px;
+  animation: updStripes 1s linear infinite;
+}
+.upd-progress[data-phase="ok"] .upd-bar span { background: var(--green); }
+.upd-progress[data-phase="fail"] .upd-bar span { background: var(--red); }
+@keyframes updStripes { from { background-position: 0 0; } to { background-position: 16px 0; } }
+.upd-head { font-size: 12px; color: var(--text); }
+.upd-progress[data-phase="fail"] .upd-head { color: var(--red); }
+.upd-progress[data-phase="ok"] .upd-head { color: var(--green); }
+.upd-steps { list-style: none; display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--dim); }
+.upd-steps li { display: flex; align-items: center; gap: 8px; }
+.upd-steps li::before {
+  content: ''; flex-shrink: 0; width: 14px; height: 14px; box-sizing: border-box;
+  border: 2px solid var(--border); border-radius: 50%;
+}
+.upd-steps li.done { color: var(--text); }
+.upd-steps li.done::before { border-color: var(--green); background: var(--green); }
+.upd-steps li.active { color: var(--text-strong); font-weight: 600; }
+.upd-steps li.active::before { border-color: var(--accent); border-top-color: transparent; animation: updSpin .8s linear infinite; }
+.upd-steps li.failed { color: var(--red); font-weight: 600; }
+.upd-steps li.failed::before { border-color: var(--red); background: var(--red); }
+@keyframes updSpin { to { transform: rotate(360deg); } }
+
 /* ── Modal de actualización ───────────────── */
 .update-modal { border-radius: 12px; }
 .um-header { display: flex; align-items: center; justify-content: space-between; padding: 18px 20px 4px; flex-shrink: 0; }

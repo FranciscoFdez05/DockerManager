@@ -1,7 +1,9 @@
 """Tests de la lectura del CHANGELOG publicado (actualizacion.py), sin red."""
 
+import json
 import os
 import sys
+from datetime import datetime
 
 import pytest
 
@@ -218,3 +220,62 @@ def test_version_remota_sin_api_sigue_por_la_rama(cacheLimpia, monkeypatch):
     remota = actualizacion.version_remota(forzar=True)
     assert remota["publicada"] == actualizacion.__version__ and remota["error"] is None
     assert "https://raw.githubusercontent.com/usuario/repo/main/version.py" in urls
+
+
+# ── Progreso de la actualización ──────────────────────────────────────────────
+@pytest.fixture
+def buzon(tmp_path, monkeypatch):
+    monkeypatch.setattr(actualizacion.cfg_ini, "UPDATE_DIR", str(tmp_path))
+    return tmp_path
+
+
+def _escribir(buzon, nombre, datos):
+    (buzon / nombre).write_text(datos if isinstance(datos, str) else json.dumps(datos), encoding="utf-8")
+
+
+def _en_marcha(buzon):
+    _escribir(buzon, actualizacion.ESTADO, {
+        "estado": "en_marcha", "solicitadaEn": datetime.now().isoformat(timespec="seconds"),
+    })
+
+
+def test_progreso_se_devuelve_mientras_dura(buzon):
+    _en_marcha(buzon)
+    _escribir(buzon, actualizacion.PROGRESO, {"paso": 3, "total": 5, "titulo": "Construyendo la imagen 1.3.0",
+                                              "actualizadoEn": "2026-11-17T10:00:00"})
+    estado = actualizacion.estado()
+    assert estado["enMarcha"] is True
+    assert estado["progreso"] == {"paso": 3, "total": 5, "titulo": "Construyendo la imagen 1.3.0",
+                                  "actualizadoEn": "2026-11-17T10:00:00"}
+
+
+def test_progreso_no_se_devuelve_si_ya_acabo(buzon):
+    _escribir(buzon, actualizacion.ESTADO, {"estado": "ok", "codigo": 0, "solicitadaEn": "2026-11-17T10:00:00"})
+    _escribir(buzon, actualizacion.PROGRESO, {"paso": 5, "total": 5, "titulo": "Comprobando"})
+    assert actualizacion.estado()["progreso"] is None
+
+
+def test_progreso_sin_fichero(buzon):
+    _en_marcha(buzon)
+    assert actualizacion.estado()["progreso"] is None
+
+
+@pytest.mark.parametrize("contenido", [
+    "{no es json",
+    "[1, 2]",
+    {"paso": "3", "total": 5, "titulo": "x"},
+    {"paso": 3, "total": 5},
+    {"paso": 0, "total": 5, "titulo": "x"},
+    {"paso": 6, "total": 5, "titulo": "x"},
+    {"paso": 1, "total": 0, "titulo": "x"},
+])
+def test_progreso_mal_formado_se_ignora(buzon, contenido):
+    _en_marcha(buzon)
+    _escribir(buzon, actualizacion.PROGRESO, contenido)
+    assert actualizacion.estado()["progreso"] is None
+
+
+def test_progreso_recorta_titulos_largos(buzon):
+    _en_marcha(buzon)
+    _escribir(buzon, actualizacion.PROGRESO, {"paso": 1, "total": 5, "titulo": "x" * 500})
+    assert len(actualizacion.estado()["progreso"]["titulo"]) == 120
